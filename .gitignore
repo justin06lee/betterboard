@@ -1,0 +1,18 @@
+# deps
+node_modules/
+
+# build outputs
+dist/
+out/
+
+# env / secrets
+.env
+.env.*
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# editors
+.idea/
+.vscode/
