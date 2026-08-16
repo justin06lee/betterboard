@@ -51,7 +51,7 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Zoom | Pinch, `⌘` + scroll, `⌘+` / `⌘−` / `⌘0`, or the zoom pill |
 | Zoom to fit | `⌘1` |
 | Normalize zoom | `⇧⌘N` or the ⤢ button in the zoom pill |
-| Tools | `B`/`P` pen · `E` eraser · `H` hand |
+| Tools | `B`/`P` pen · `E` toggles eraser/pen · `H` hand |
 | Stroke size | `[` and `]` or the slider |
 | Undo / redo | `⌘Z` / `⇧⌘Z` |
 | New / open / save / export | `⌘N` / `⌘O` / `⌘S` / `⌘E` |

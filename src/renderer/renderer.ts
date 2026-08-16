@@ -449,7 +449,7 @@ window.addEventListener('keydown', (e) => {
       setTool('pen');
       break;
     case 'e':
-      setTool('eraser');
+      setTool(tool === 'eraser' ? 'pen' : 'eraser');
       break;
     case 'h':
       setTool('hand');
