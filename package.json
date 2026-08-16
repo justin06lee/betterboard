@@ -1,7 +1,7 @@
 {
   "name": "betterboard",
   "productName": "BetterBoard",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "An infinite whiteboard for pen displays.",
   "main": "src/main/main.js",
