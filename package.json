@@ -1,0 +1,24 @@
+{
+  "name": "betterboard",
+  "productName": "BetterBoard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An infinite whiteboard for pen displays.",
+  "main": "src/main/main.js",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "bun run check && bun build src/renderer/renderer.ts --outdir=dist --format=iife --minify && cp src/renderer/index.html src/renderer/style.css dist/",
+    "dev": "bun run build && bunx electron .",
+    "start": "bunx electron ."
+  },
+  "dependencies": {
+    "perfect-freehand": "^1.2.2"
+  },
+  "devDependencies": {
+    "electron": "^43.4.0",
+    "typescript": "^5.6.0"
+  },
+  "trustedDependencies": [
+    "electron"
+  ]
+}
