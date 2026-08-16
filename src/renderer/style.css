@@ -1,0 +1,221 @@
+:root {
+  --bg: #15161a;
+  --bar: rgba(24, 25, 30, 0.92);
+  --bar-border: #26272e;
+  --fg: #e8eaed;
+  --fg-dim: #9a9daa;
+  --hover: #26272e;
+  --active: #33353d;
+  --accent: #4cc9f0;
+}
+
+body.light {
+  --bg: #fafafa;
+  --bar: rgba(255, 255, 255, 0.92);
+  --bar-border: #e2e2e6;
+  --fg: #1e1e24;
+  --fg-dim: #71727c;
+  --hover: #ececf0;
+  --active: #e2e2e8;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  user-select: none;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+}
+
+.topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px 0 86px; /* left inset clears the macOS traffic lights */
+  background: var(--bar);
+  border-bottom: 1px solid var(--bar-border);
+  -webkit-app-region: drag;
+  z-index: 10;
+}
+
+.topbar button,
+.topbar input,
+.topbar label {
+  -webkit-app-region: no-drag;
+}
+
+.brand {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--fg-dim);
+}
+
+.topbar-left {
+  min-width: 90px;
+}
+
+.topbar-center,
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sep {
+  width: 1px;
+  height: 22px;
+  background: var(--bar-border);
+  margin: 0 6px;
+}
+
+.tool {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.tool svg {
+  width: 19px;
+  height: 19px;
+}
+
+.tool:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.tool.active {
+  background: var(--active);
+  color: var(--accent);
+}
+
+.tool:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  outline: 1px solid var(--bar-border);
+  cursor: pointer;
+  margin: 0 2px;
+}
+
+.swatch.active {
+  border-color: var(--bg);
+  outline: 2px solid var(--accent);
+}
+
+.color-well {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  margin-left: 4px;
+  border-radius: 50%;
+  overflow: hidden;
+  outline: 1px solid var(--bar-border);
+  cursor: pointer;
+  background: conic-gradient(#ef476f, #ffb703, #06d6a0, #4cc9f0, #a78bfa, #ef476f);
+}
+
+.color-well input {
+  position: absolute;
+  inset: -8px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.size-group {
+  gap: 8px;
+}
+
+.size-group input[type='range'] {
+  width: 90px;
+  accent-color: var(--accent);
+}
+
+.size-preview {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+}
+
+#size-dot {
+  background: var(--fg);
+  border-radius: 50%;
+  width: 5px;
+  height: 5px;
+}
+
+#board {
+  position: fixed;
+  top: 48px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: calc(100% - 48px);
+  touch-action: none;
+}
+
+.zoom-pill {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  background: var(--bar);
+  border: 1px solid var(--bar-border);
+  border-radius: 10px;
+  overflow: hidden;
+  z-index: 10;
+}
+
+.zoom-pill button {
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  height: 30px;
+  padding: 0 10px;
+  font-size: 13px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.zoom-pill button:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+#zoom-label {
+  min-width: 52px;
+}
