@@ -219,3 +219,25 @@ body {
 #zoom-label {
   min-width: 52px;
 }
+
+#normalize {
+  border-left: 1px solid var(--bar-border);
+}
+
+#normalize svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
+#normalize.pulse {
+  animation: pulse 0.55s ease-in-out 3;
+  color: var(--accent);
+}
+
+@keyframes pulse {
+  50% {
+    background: var(--active);
+    transform: scale(1.15);
+  }
+}

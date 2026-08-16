@@ -19,6 +19,7 @@ betterboard is a macOS desktop whiteboard designed around drawing tablets like t
 - **Infinite canvas** — pan and zoom without bounds, with an adaptive dot grid
 - **Stylus-native gestures** — the pen's eraser end erases, the barrel button pans, touch pans
 - **Stroke eraser** — removes whole strokes, one undo step per gesture
+- **Normalize zoom** — one press rebases the current view as the new 100%, restoring the full zoom range without moving a pixel; when you hit the zoom-out floor, the button pulses to offer it
 - **Undo / redo**, dark & light board themes, autosave and session restore
 - **Save / open** boards as JSON, **export** the whole drawing as PNG
 
@@ -49,6 +50,7 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Pan | Space + drag, `H`, middle/right drag, pen barrel button, touch, or two-finger scroll |
 | Zoom | Pinch, `⌘` + scroll, `⌘+` / `⌘−` / `⌘0`, or the zoom pill |
 | Zoom to fit | `⌘1` |
+| Normalize zoom | `⇧⌘N` or the ⤢ button in the zoom pill |
 | Tools | `B`/`P` pen · `E` eraser · `H` hand |
 | Stroke size | `[` and `]` or the slider |
 | Undo / redo | `⌘Z` / `⇧⌘Z` |

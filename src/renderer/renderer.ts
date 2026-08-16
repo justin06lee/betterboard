@@ -2,7 +2,7 @@ import { buildPath, strokeHit } from './ink';
 import { render, renderExport } from './render';
 import { Board } from './store';
 import type { Camera, Stroke } from './types';
-import { THEMES, clampScale, emptyBBox, growBBox, toWorld, uid } from './types';
+import { MIN_SCALE, THEMES, clampScale, emptyBBox, growBBox, toWorld, uid } from './types';
 
 type Tool = 'pen' | 'eraser' | 'hand';
 type ThemeName = 'dark' | 'light';
@@ -56,6 +56,7 @@ const redoBtn = $('redo') as HTMLButtonElement;
 const gridBtn = $('grid-btn');
 const themeBtn = $('theme-btn');
 const zoomLabel = $('zoom-label');
+const normalizeBtn = $('normalize') as HTMLButtonElement;
 
 // ---- rendering loop -------------------------------------------------------
 
@@ -117,7 +118,15 @@ function loadPrefs(): void {
 
 // ---- camera ---------------------------------------------------------------
 
+let pulseTimer: number | undefined;
+function nudgeNormalize(): void {
+  normalizeBtn.classList.add('pulse');
+  clearTimeout(pulseTimer);
+  pulseTimer = window.setTimeout(() => normalizeBtn.classList.remove('pulse'), 1600);
+}
+
 function zoomAt(sx: number, sy: number, factor: number): void {
+  if (factor < 1 && camera.scale <= MIN_SCALE) nudgeNormalize();
   const w = toWorld(camera, sx, sy);
   camera.scale = clampScale(camera.scale * factor);
   camera.x = w.x - sx / camera.scale;
@@ -162,6 +171,46 @@ function zoomFit(): void {
 
 function updateZoomLabel(): void {
   zoomLabel.textContent = `${Math.round(camera.scale * 100)}%`;
+}
+
+// Rebases the world so the current view becomes the new 100%: every stored
+// point and stroke size is multiplied by the current scale, the camera
+// compensates, and nothing moves on screen — but the full zoom range is
+// available again from here.
+function normalize(): void {
+  if (drag || live || camera.scale === 1) return;
+  const f = camera.scale;
+  board.scaleAll(f);
+  camera.x *= f;
+  camera.y *= f;
+  camera.scale = 1;
+  updateZoomLabel();
+  requestRender();
+  scheduleAutosave();
+}
+
+// Scale ops change world coordinates, so undo/redo of one must counter-move
+// the camera to keep the view visually anchored.
+function doUndo(): void {
+  const op = board.undo();
+  if (op?.type === 'scale') {
+    camera.x /= op.factor;
+    camera.y /= op.factor;
+    camera.scale = clampScale(camera.scale * op.factor);
+    updateZoomLabel();
+    requestRender();
+  }
+}
+
+function doRedo(): void {
+  const op = board.redo();
+  if (op?.type === 'scale') {
+    camera.x *= op.factor;
+    camera.y *= op.factor;
+    camera.scale = clampScale(camera.scale / op.factor);
+    updateZoomLabel();
+    requestRender();
+  }
 }
 
 // ---- ui sync --------------------------------------------------------------
@@ -484,10 +533,13 @@ window.betterboard.onMenu((action) => {
       void exportPNG();
       break;
     case 'undo':
-      board.undo();
+      doUndo();
       break;
     case 'redo':
-      board.redo();
+      doRedo();
+      break;
+    case 'normalize':
+      normalize();
       break;
     case 'clear':
       void (async () => {
@@ -547,8 +599,8 @@ colorInput.addEventListener('input', () => {
 
 sizeInput.addEventListener('input', () => setSize(Number(sizeInput.value)));
 
-undoBtn.addEventListener('click', () => board.undo());
-redoBtn.addEventListener('click', () => board.redo());
+undoBtn.addEventListener('click', doUndo);
+redoBtn.addEventListener('click', doRedo);
 gridBtn.addEventListener('click', () => {
   grid = !grid;
   gridBtn.classList.toggle('active', grid);
@@ -560,6 +612,7 @@ themeBtn.addEventListener('click', toggleTheme);
 $('zoom-in').addEventListener('click', () => zoomAt(cssWidth / 2, cssHeight / 2, 1.25));
 $('zoom-out').addEventListener('click', () => zoomAt(cssWidth / 2, cssHeight / 2, 0.8));
 zoomLabel.addEventListener('click', () => zoomTo(1));
+normalizeBtn.addEventListener('click', normalize);
 
 // ---- init -------------------------------------------------------------------
 
