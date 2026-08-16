@@ -1,29 +1,36 @@
 <svg width="660" height="200" viewBox="0 0 660 200" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="ink" x1="200" y1="60" x2="460" y2="150" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#a78bfa"/>
-      <stop offset="0.5" stop-color="#4cc9f0"/>
-      <stop offset="1" stop-color="#06d6a0"/>
-    </linearGradient>
-    <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
-      <circle cx="3" cy="3" r="1.3" fill="#272a33"/>
+    <pattern id="tone" width="9" height="9" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.3" fill="#000"/>
+      <circle cx="6.5" cy="6.5" r="1.3" fill="#000"/>
     </pattern>
-    <clipPath id="card">
-      <rect width="660" height="200" rx="20"/>
-    </clipPath>
   </defs>
-  <g clip-path="url(#card)">
-    <rect width="660" height="200" fill="#14161b"/>
-    <rect width="660" height="200" fill="url(#dots)"/>
-    <path d="M330 100 C296 46 206 46 206 100 C206 154 296 154 330 100 C364 46 454 46 454 100 C454 154 364 154 330 100"
-          stroke="url(#ink)" stroke-width="15" stroke-linecap="round"/>
-    <path d="M330 100 C296 46 206 46 206 100"
-          stroke="#ffffff" stroke-opacity="0.14" stroke-width="5" stroke-linecap="round"/>
-    <circle cx="330" cy="100" r="7" fill="#e8eaed"/>
-    <circle cx="500" cy="58" r="4" fill="#ef476f"/>
-    <circle cx="522" cy="130" r="3" fill="#ffb703"/>
-    <circle cx="152" cy="142" r="4" fill="#4cc9f0"/>
-    <circle cx="136" cy="64" r="3" fill="#a78bfa"/>
+
+  <!-- panel -->
+  <rect x="3" y="3" width="654" height="194" fill="#fff" stroke="#000" stroke-width="6"/>
+  <polygon points="6,6 235,6 6,112" fill="url(#tone)"/>
+  <polygon points="654,194 654,88 428,194" fill="url(#tone)"/>
+  <rect x="14" y="14" width="632" height="172" stroke="#000" stroke-width="1.5"/>
+
+  <!-- the ink: an infinity loop, right lobe still being drawn -->
+  <path d="M330 100 C296 46 206 46 206 100 C206 154 296 154 330 100 C364 46 454 46 454 100 C454 130 428 148 400 143"
+        stroke="#000" stroke-width="13" stroke-linecap="round"/>
+
+  <!-- ink birds lifting off the stroke -->
+  <path d="M275 44 Q281 35 288 44 Q295 35 301 44" stroke="#000" stroke-width="3" stroke-linecap="round"/>
+  <path d="M310 29 Q315 22 320 29 Q325 22 330 29" stroke="#000" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="272" cy="58" r="2.5" fill="#000"/>
+  <circle cx="296" cy="50" r="1.8" fill="#000"/>
+
+  <!-- speed lines -->
+  <line x1="498" y1="56" x2="616" y2="56" stroke="#000" stroke-width="2"/>
+  <line x1="514" y1="74" x2="630" y2="74" stroke="#000" stroke-width="2"/>
+  <line x1="506" y1="92" x2="586" y2="92" stroke="#000" stroke-width="2"/>
+
+  <!-- the pen, nib on the wet end of the stroke -->
+  <g transform="rotate(18 400 143)">
+    <path d="M400 143 L420 135 L420 151 Z" fill="#000"/>
+    <rect x="420" y="133" width="90" height="20" rx="7" fill="#fff" stroke="#000" stroke-width="3"/>
+    <line x1="434" y1="133" x2="434" y2="153" stroke="#000" stroke-width="3"/>
   </g>
-  <rect x="0.5" y="0.5" width="659" height="199" rx="19.5" stroke="#2c2f38"/>
 </svg>
