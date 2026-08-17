@@ -1,4 +1,5 @@
 interface BetterboardAPI {
+  platform: string;
   autosave(json: string): Promise<void>;
   loadAutosave(): Promise<string | null>;
   saveBoard(json: string): Promise<boolean>;

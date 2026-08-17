@@ -11,7 +11,7 @@
 
 ---
 
-betterboard is a macOS desktop whiteboard designed around drawing tablets like the Huion Kamvas Pro. Strokes are stored as vectors — pressure-weighted centerlines rendered with [perfect-freehand](https://github.com/steveruizok/perfect-freehand) — so the canvas is truly infinite, zooming is lossless, and erasing works per stroke.
+betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designed around drawing tablets like the Huion Kamvas Pro. Strokes are stored as vectors — pressure-weighted centerlines rendered with [perfect-freehand](https://github.com/steveruizok/perfect-freehand) — so the canvas is truly infinite, zooming is lossless, and erasing works per stroke.
 
 ## Features
 
@@ -29,7 +29,12 @@ betterboard is a macOS desktop whiteboard designed around drawing tablets like t
 make
 ```
 
-That builds the app, installs `BetterBoard.app` into `/Applications`, and launches it. Later, `make update` rebuilds and reinstalls in one step.
+One command on either platform; `make update` rebuilds and reinstalls in one step.
+
+- **macOS** — installs `BetterBoard.app` into `/Applications` and launches it.
+- **Linux (incl. arm64 Ubuntu)** — installs to `~/.local/opt/betterboard` with a `betterboard` command on your PATH, a desktop entry, and an icon. On Ubuntu 24.04+ the install asks for sudo once to setuid Electron's `chrome-sandbox` (the kernel restricts unprivileged user namespaces there).
+
+Keyboard shortcuts below are written with macOS keys; on Linux read `⌘` as `Ctrl`.
 
 ## Develop
 

@@ -4,6 +4,8 @@ const path = require('path');
 
 app.setName('BetterBoard');
 
+const isMac = process.platform === 'darwin';
+
 const userData = () => app.getPath('userData');
 const autosavePath = () => path.join(userData(), 'autosave.json');
 const windowStatePath = () => path.join(userData(), 'window.json');
@@ -27,7 +29,7 @@ function createWindow() {
     y: saved?.y,
     minWidth: 720,
     minHeight: 480,
-    titleBarStyle: 'hiddenInset',
+    ...(isMac ? { titleBarStyle: 'hiddenInset' } : {}),
     backgroundColor: '#15161a',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -53,18 +55,22 @@ function send(action) {
 
 function buildMenu() {
   const template = [
-    {
-      label: app.name,
-      submenu: [
-        { role: 'about' },
-        { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideOthers' },
-        { role: 'unhide' },
-        { type: 'separator' },
-        { role: 'quit' },
-      ],
-    },
+    ...(isMac
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+        ]
+      : []),
     {
       label: 'File',
       submenu: [
@@ -74,7 +80,7 @@ function buildMenu() {
         { label: 'Save As…', accelerator: 'CmdOrCtrl+S', click: () => send('save') },
         { label: 'Export PNG…', accelerator: 'CmdOrCtrl+E', click: () => send('export') },
         { type: 'separator' },
-        { role: 'close' },
+        isMac ? { role: 'close' } : { role: 'quit' },
       ],
     },
     {
