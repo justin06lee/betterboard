@@ -179,7 +179,12 @@ export class Board {
     this.changed();
     const c = data.camera;
     if (c && Number.isFinite(c.x) && Number.isFinite(c.y) && Number.isFinite(c.scale) && c.scale > 0) {
-      return { x: c.x, y: c.y, scale: c.scale };
+      return {
+        x: c.x,
+        y: c.y,
+        scale: c.scale,
+        rotation: Number.isFinite(c.rotation) ? c.rotation : 0,
+      };
     }
     return null;
   }

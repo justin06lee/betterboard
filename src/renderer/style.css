@@ -187,6 +187,53 @@ body {
   touch-action: none;
 }
 
+.rot-wheel {
+  position: fixed;
+  left: 50%;
+  top: calc(50% + 24px); /* center of the canvas area below the 48px topbar */
+  width: 160px;
+  height: 160px;
+  margin: -80px 0 0 -80px;
+  z-index: 20;
+  touch-action: none;
+  cursor: grab;
+}
+
+.rot-wheel.hidden {
+  display: none;
+}
+
+.rot-ring {
+  position: absolute;
+  inset: 9px;
+  border: 2px solid var(--fg-dim);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bar) 72%, transparent);
+}
+
+#rot-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+}
+
+#rot-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--fg);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
 .zoom-pill {
   position: fixed;
   right: 14px;

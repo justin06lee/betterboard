@@ -21,11 +21,14 @@ export interface Stroke {
   path?: Path2D; // cached outline, world coordinates
 }
 
-// camera.x/y = world coordinates of the screen origin (top-left)
+// camera.x/y = world coordinates of the screen origin (top-left);
+// rotation = clockwise view rotation in radians.
+// world -> screen: s = R(rotation) * (w - camera.xy) * scale
 export interface Camera {
   x: number;
   y: number;
   scale: number;
+  rotation: number;
 }
 
 export interface Theme {
@@ -47,7 +50,20 @@ export function clampScale(s: number): number {
 }
 
 export function toWorld(camera: Camera, sx: number, sy: number): { x: number; y: number } {
-  return { x: sx / camera.scale + camera.x, y: sy / camera.scale + camera.y };
+  const cos = Math.cos(camera.rotation);
+  const sin = Math.sin(camera.rotation);
+  const ux = sx / camera.scale;
+  const uy = sy / camera.scale;
+  return { x: camera.x + ux * cos + uy * sin, y: camera.y - ux * sin + uy * cos };
+}
+
+// Repositions camera.x/y so the world point `w` lands on screen point (sx, sy)
+// under the camera's current scale and rotation.
+export function anchorCamera(camera: Camera, w: { x: number; y: number }, sx: number, sy: number): void {
+  const cos = Math.cos(camera.rotation);
+  const sin = Math.sin(camera.rotation);
+  camera.x = w.x - (sx * cos + sy * sin) / camera.scale;
+  camera.y = w.y - (-sx * sin + sy * cos) / camera.scale;
 }
 
 export function emptyBBox(): BBox {

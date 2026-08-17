@@ -1,5 +1,5 @@
 import type { BBox, Camera, Stroke, Theme } from './types';
-import { bboxIntersects } from './types';
+import { bboxIntersects, emptyBBox, growBBox, toWorld } from './types';
 
 export interface RenderOpts {
   theme: Theme;
@@ -10,13 +10,8 @@ export interface RenderOpts {
 
 const GRID_BASE = 40; // world units between dots at scale 1
 
-function drawGrid(
-  ctx: CanvasRenderingContext2D,
-  camera: Camera,
-  width: number,
-  height: number,
-  color: string
-): void {
+// Drawn under the world transform, so the dots rotate with the canvas.
+function drawGrid(ctx: CanvasRenderingContext2D, camera: Camera, view: BBox, color: string): void {
   // Pick the power-of-two multiple of the base spacing that lands in a
   // comfortable on-screen range, and fade dots in as they spread out.
   let spacing = GRID_BASE;
@@ -26,20 +21,17 @@ function drawGrid(
   const alpha = Math.min(1, (screenSpacing - 10) / 18);
   if (alpha <= 0) return;
 
-  ctx.save();
   ctx.globalAlpha = alpha * 0.8;
   ctx.fillStyle = color;
-  const startX = Math.floor(camera.x / spacing) * spacing;
-  const startY = Math.floor(camera.y / spacing) * spacing;
-  const r = Math.min(2, Math.max(1, screenSpacing / 24));
-  for (let wx = startX; (wx - camera.x) * camera.scale < width; wx += spacing) {
-    const sx = (wx - camera.x) * camera.scale;
-    for (let wy = startY; (wy - camera.y) * camera.scale < height; wy += spacing) {
-      const sy = (wy - camera.y) * camera.scale;
-      ctx.fillRect(sx - r / 2, sy - r / 2, r, r);
+  const r = Math.min(2, Math.max(1, screenSpacing / 24)) / camera.scale;
+  const startX = Math.floor(view.minX / spacing) * spacing;
+  const startY = Math.floor(view.minY / spacing) * spacing;
+  for (let wx = startX; wx <= view.maxX; wx += spacing) {
+    for (let wy = startY; wy <= view.maxY; wy += spacing) {
+      ctx.fillRect(wx - r / 2, wy - r / 2, r, r);
     }
   }
-  ctx.restore();
+  ctx.globalAlpha = 1;
 }
 
 export function render(
@@ -57,23 +49,31 @@ export function render(
   ctx.fillStyle = opts.theme.bg;
   ctx.fillRect(0, 0, width, height);
 
-  if (opts.grid) drawGrid(ctx, camera, width, height, opts.theme.grid);
+  // World-space AABB of the (possibly rotated) viewport, for culling and grid.
+  const view = emptyBBox();
+  for (const [sx, sy] of [
+    [0, 0],
+    [width, 0],
+    [0, height],
+    [width, height],
+  ]) {
+    const w = toWorld(camera, sx, sy);
+    growBBox(view, w.x, w.y, 0);
+  }
 
-  // World-space pass: one transform, cached Path2D per stroke, viewport culling.
-  const view: BBox = {
-    minX: camera.x,
-    minY: camera.y,
-    maxX: camera.x + width / camera.scale,
-    maxY: camera.y + height / camera.scale,
-  };
+  // World-space pass: one transform, cached Path2D per stroke.
+  const k = dpr * camera.scale;
+  const cos = Math.cos(camera.rotation);
+  const sin = Math.sin(camera.rotation);
   ctx.setTransform(
-    dpr * camera.scale,
-    0,
-    0,
-    dpr * camera.scale,
-    -camera.x * camera.scale * dpr,
-    -camera.y * camera.scale * dpr
+    k * cos,
+    k * sin,
+    -k * sin,
+    k * cos,
+    -k * (cos * camera.x - sin * camera.y),
+    -k * (sin * camera.x + cos * camera.y)
   );
+  if (opts.grid) drawGrid(ctx, camera, view, opts.theme.grid);
   for (const s of strokes) {
     if (!s.path || !bboxIntersects(s.bbox, view)) continue;
     ctx.fillStyle = s.color;
@@ -98,6 +98,7 @@ export function render(
 }
 
 // Renders all strokes into an offscreen canvas sized to fit the content.
+// Exports are always axis-aligned, regardless of the view rotation.
 export function renderExport(strokes: Stroke[], content: BBox, theme: Theme): HTMLCanvasElement {
   const PAD = 60;
   const MAX_DIM = 4096;
