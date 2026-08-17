@@ -1,0 +1,21 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="itone" width="18" height="18" patternUnits="userSpaceOnUse">
+      <circle cx="4" cy="4" r="2.6" fill="#000"/>
+      <circle cx="13" cy="13" r="2.6" fill="#000"/>
+    </pattern>
+    <clipPath id="icard">
+      <rect x="16" y="16" width="480" height="480" rx="96"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#icard)">
+    <rect x="16" y="16" width="480" height="480" fill="#fff"/>
+    <polygon points="16,16 200,16 16,200" fill="url(#itone)"/>
+    <polygon points="496,496 496,312 312,496" fill="url(#itone)"/>
+    <path d="M256 256 C224 204 138 204 138 256 C138 308 224 308 256 256 C288 204 374 204 374 256 C374 288 348 306 318 300"
+          stroke="#000" stroke-width="34" stroke-linecap="round"/>
+    <path d="M236 130 Q249 112 262 130 Q275 112 288 130" stroke="#000" stroke-width="9" stroke-linecap="round"/>
+    <circle cx="222" cy="152" r="6" fill="#000"/>
+  </g>
+  <rect x="16" y="16" width="480" height="480" rx="96" stroke="#000" stroke-width="22"/>
+</svg>

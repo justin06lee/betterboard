@@ -706,6 +706,7 @@ normalizeBtn.addEventListener('click', normalize);
 // ---- init -------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  document.body.classList.toggle('mac', window.betterboard.platform === 'darwin');
   loadPrefs();
   applyTheme();
   setTool(tool);

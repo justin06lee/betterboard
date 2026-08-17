@@ -43,11 +43,16 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 12px 0 86px; /* left inset clears the macOS traffic lights */
+  padding: 0 12px;
   background: var(--bar);
   border-bottom: 1px solid var(--bar-border);
-  -webkit-app-region: drag;
   z-index: 10;
+}
+
+/* frameless on macOS: clear the traffic lights and make the bar draggable */
+body.mac .topbar {
+  padding-left: 86px;
+  -webkit-app-region: drag;
 }
 
 .topbar button,

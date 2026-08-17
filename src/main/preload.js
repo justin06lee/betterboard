@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('betterboard', {
+  platform: process.platform,
   autosave: (json) => ipcRenderer.invoke('board:autosave', json),
   loadAutosave: () => ipcRenderer.invoke('board:load-autosave'),
   saveBoard: (json) => ipcRenderer.invoke('board:save', json),
