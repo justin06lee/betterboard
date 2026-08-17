@@ -1,14 +1,30 @@
 import { buildPath, strokeHit } from './ink';
 import { render, renderExport } from './render';
 import { Board } from './store';
-import type { Camera, Stroke } from './types';
-import { MIN_SCALE, THEMES, anchorCamera, clampScale, emptyBBox, growBBox, toWorld, uid } from './types';
+import type { Camera, Point, Stroke } from './types';
+import {
+  MIN_SCALE,
+  THEMES,
+  anchorCamera,
+  bboxIntersects,
+  clampScale,
+  emptyBBox,
+  growBBox,
+  pointInPolygon,
+  polygonBBox,
+  toWorld,
+  toWorldDelta,
+  uid,
+} from './types';
 
-type Tool = 'pen' | 'eraser' | 'hand';
+type Tool = 'pen' | 'eraser' | 'select' | 'hand';
 type ThemeName = 'dark' | 'light';
 
 const ERASER_RADIUS = 16; // screen px
 const MIN_DIST = 0.75; // screen px between recorded points
+const LASSO_MIN_DIST = 2.5; // screen px between recorded lasso points
+const TAP_SLOP = 6; // screen px: a lasso smaller than this counts as a tap
+const ENCLOSED = 0.7; // fraction of a stroke's points that must fall inside the lasso
 const SWATCHES = ['#e8eaed', '#1e1e24', '#ef476f', '#ffb703', '#06d6a0', '#4cc9f0', '#a78bfa'];
 const EMPTY_BOARD = '{"app":"betterboard","version":1,"strokes":[]}';
 
@@ -27,9 +43,22 @@ let spaceHeld = false;
 let eraserCursor: { x: number; y: number } | null = null;
 const erasePending = new Set<string>();
 
+// The lasso path while it is being drawn, then the committed selection it
+// produced. Both live in world coordinates, so they stay put under pan, zoom
+// and rotation without any bookkeeping.
+let lasso: Point[] | null = null;
+let selection: { ids: Set<string>; poly: Point[] } | null = null;
+let moveX = 0;
+let moveY = 0;
+let hoverInSelection = false;
+let dashOffset = 0;
+let antsTimer: number | undefined;
+
 type Drag =
   | { kind: 'draw' }
   | { kind: 'erase' }
+  | { kind: 'lasso' }
+  | { kind: 'move'; startX: number; startY: number }
   | { kind: 'pan'; startX: number; startY: number; camX: number; camY: number };
 let drag: Drag | null = null;
 let activePointer: number | null = null;
@@ -45,6 +74,7 @@ const $ = (id: string) => document.getElementById(id)!;
 const toolButtons: Record<Tool, HTMLElement> = {
   pen: $('tool-pen'),
   eraser: $('tool-eraser'),
+  select: $('tool-select'),
   hand: $('tool-hand'),
 };
 const swatchesEl = $('swatches');
@@ -77,6 +107,11 @@ function requestRender(): void {
         tool === 'eraser' && eraserCursor
           ? { x: eraserCursor.x, y: eraserCursor.y, radius: ERASER_RADIUS }
           : null,
+      marquee: lasso
+        ? { poly: lasso, ids: null, dx: 0, dy: 0, dashOffset }
+        : selection
+          ? { poly: selection.poly, ids: selection.ids, dx: moveX, dy: moveY, dashOffset }
+          : null,
     });
   });
 }
@@ -108,7 +143,9 @@ function savePrefs(): void {
 function loadPrefs(): void {
   try {
     const p = JSON.parse(localStorage.getItem('bb:prefs') ?? '{}');
-    if (p.tool === 'pen' || p.tool === 'eraser' || p.tool === 'hand') tool = p.tool;
+    if (p.tool === 'pen' || p.tool === 'eraser' || p.tool === 'select' || p.tool === 'hand') {
+      tool = p.tool;
+    }
     if (typeof p.color === 'string') color = p.color;
     if (Number.isFinite(p.size)) size = Math.min(28, Math.max(1, p.size));
     if (p.themeName === 'light' || p.themeName === 'dark') themeName = p.themeName;
@@ -179,6 +216,7 @@ function updateZoomLabel(): void {
 // available again from here.
 function normalize(): void {
   if (drag || live || camera.scale === 1) return;
+  clearSelection(); // every world coordinate is about to change
   const f = camera.scale;
   board.scaleAll(f);
   camera.x *= f;
@@ -193,24 +231,43 @@ function normalize(): void {
 // the camera to keep the view visually anchored.
 function doUndo(): void {
   const op = board.undo();
-  if (op?.type === 'scale') {
+  if (!op) return;
+  if (op.type === 'scale') {
     camera.x /= op.factor;
     camera.y /= op.factor;
     camera.scale = clampScale(camera.scale * op.factor);
     updateZoomLabel();
     requestRender();
+  } else {
+    afterEdit(op.type === 'move' ? { ids: op.ids, dx: -op.dx, dy: -op.dy } : null);
   }
 }
 
 function doRedo(): void {
   const op = board.redo();
-  if (op?.type === 'scale') {
+  if (!op) return;
+  if (op.type === 'scale') {
     camera.x *= op.factor;
     camera.y *= op.factor;
     camera.scale = clampScale(camera.scale / op.factor);
     updateZoomLabel();
     requestRender();
+  } else {
+    afterEdit(op.type === 'move' ? { ids: op.ids, dx: op.dx, dy: op.dy } : null);
   }
+}
+
+// Undoing a move should leave the outline wrapped around the strokes it holds;
+// any other edit can invalidate what is selected, so the selection is dropped.
+function afterEdit(moved: { ids: string[]; dx: number; dy: number } | null): void {
+  const sel = selection;
+  if (!sel) return;
+  if (moved && moved.ids.length === sel.ids.size && moved.ids.every((id) => sel.ids.has(id))) {
+    sel.poly = sel.poly.map((p) => ({ x: p.x + moved.dx, y: p.y + moved.dy }));
+    requestRender();
+    return;
+  }
+  clearSelection();
 }
 
 // ---- rotation wheel ---------------------------------------------------------
@@ -282,6 +339,7 @@ function setTool(t: Tool): void {
     el.classList.toggle('active', name === t);
   }
   if (t !== 'eraser') eraserCursor = null;
+  if (t !== 'select') clearSelection();
   updateCursor();
   savePrefs();
   requestRender();
@@ -325,8 +383,10 @@ function updateUndoButtons(): void {
 
 function updateCursor(): void {
   if (drag?.kind === 'pan') canvas.style.cursor = 'grabbing';
+  else if (drag?.kind === 'move') canvas.style.cursor = 'grabbing';
   else if (spaceHeld || tool === 'hand') canvas.style.cursor = 'grab';
   else if (tool === 'eraser') canvas.style.cursor = 'none';
+  else if (tool === 'select' && hoverInSelection) canvas.style.cursor = 'move';
   else canvas.style.cursor = 'crosshair';
 }
 
@@ -387,6 +447,106 @@ function eraseAt(e: PointerEvent): void {
   }
 }
 
+// ---- lasso selection ------------------------------------------------------
+
+// The ants only crawl while there is something to outline, so an idle board
+// costs nothing.
+function syncAnts(): void {
+  const wanted = lasso !== null || selection !== null;
+  if (wanted && antsTimer === undefined) {
+    antsTimer = window.setInterval(() => {
+      dashOffset -= 1;
+      requestRender();
+    }, 70);
+  } else if (!wanted && antsTimer !== undefined) {
+    clearInterval(antsTimer);
+    antsTimer = undefined;
+  }
+}
+
+function clearSelection(): void {
+  if (!selection && !lasso) return;
+  selection = null;
+  lasso = null;
+  moveX = 0;
+  moveY = 0;
+  hoverInSelection = false;
+  syncAnts();
+  updateCursor();
+  requestRender();
+}
+
+function addLassoPoint(e: PointerEvent): void {
+  if (!lasso) return;
+  const w = toWorld(camera, e.offsetX, e.offsetY);
+  const last = lasso[lasso.length - 1];
+  if (last) {
+    const dx = (w.x - last.x) * camera.scale;
+    const dy = (w.y - last.y) * camera.scale;
+    if (dx * dx + dy * dy < LASSO_MIN_DIST * LASSO_MIN_DIST) return;
+  }
+  lasso.push(w);
+}
+
+// A stroke joins the selection when most of it is inside the loop; requiring
+// every point makes grazing a long stroke's tail feel broken.
+function strokesInside(poly: Point[]): Set<string> {
+  const ids = new Set<string>();
+  const box = polygonBBox(poly);
+  for (const s of board.strokes) {
+    if (!bboxIntersects(s.bbox, box)) continue;
+    let hits = 0;
+    for (const pt of s.points) {
+      if (pointInPolygon(poly, pt.x, pt.y)) hits++;
+    }
+    if (hits / s.points.length >= ENCLOSED) ids.add(s.id);
+  }
+  return ids;
+}
+
+// Picks the topmost stroke under a point and wraps it in its own outline, so a
+// tap is a one-stroke selection and a tap on nothing is a deselect.
+function selectAt(w: Point): void {
+  const radius = 8 / camera.scale;
+  for (let i = board.strokes.length - 1; i >= 0; i--) {
+    const s = board.strokes[i];
+    if (!strokeHit(s, w.x, w.y, radius)) continue;
+    const pad = 6 / camera.scale;
+    const b = s.bbox;
+    selection = {
+      ids: new Set([s.id]),
+      poly: [
+        { x: b.minX - pad, y: b.minY - pad },
+        { x: b.maxX + pad, y: b.minY - pad },
+        { x: b.maxX + pad, y: b.maxY + pad },
+        { x: b.minX - pad, y: b.maxY + pad },
+      ],
+    };
+    return;
+  }
+  selection = null;
+}
+
+function commitLasso(): void {
+  const poly = lasso;
+  lasso = null;
+  if (!poly) return;
+  const box = polygonBBox(poly);
+  const span = Math.max(box.maxX - box.minX, box.maxY - box.minY) * camera.scale;
+  if (poly.length < 3 || span < TAP_SLOP) {
+    selectAt(poly[0]);
+    return;
+  }
+  const ids = strokesInside(poly);
+  selection = ids.size > 0 ? { ids, poly } : null;
+}
+
+function deleteSelection(): void {
+  if (!selection) return;
+  board.removeStrokes(selection.ids);
+  clearSelection();
+}
+
 // ---- pointer input --------------------------------------------------------
 
 canvas.addEventListener('pointerdown', (e) => {
@@ -407,6 +567,21 @@ canvas.addEventListener('pointerdown', (e) => {
     eraserCursor = { x: e.offsetX, y: e.offsetY };
     eraseAt(e);
     requestRender();
+  } else if (tool === 'select' && e.button === 0) {
+    const w = toWorld(camera, e.offsetX, e.offsetY);
+    if (selection && pointInPolygon(selection.poly, w.x, w.y)) {
+      // Press inside the outline picks the selection up instead of redrawing it.
+      drag = { kind: 'move', startX: e.clientX, startY: e.clientY };
+      moveX = 0;
+      moveY = 0;
+    } else {
+      selection = null;
+      hoverInSelection = false;
+      lasso = [w];
+      drag = { kind: 'lasso' };
+      syncAnts();
+    }
+    requestRender();
   } else if (e.button === 0) {
     drag = { kind: 'draw' };
     startStroke(e);
@@ -423,7 +598,26 @@ canvas.addEventListener('pointermove', (e) => {
     if (tool === 'eraser') {
       eraserCursor = { x: e.offsetX, y: e.offsetY };
       requestRender();
+    } else if (tool === 'select' && selection) {
+      const w = toWorld(camera, e.offsetX, e.offsetY);
+      const inside = pointInPolygon(selection.poly, w.x, w.y);
+      if (inside !== hoverInSelection) {
+        hoverInSelection = inside;
+        updateCursor();
+      }
     }
+    return;
+  }
+  if (drag.kind === 'move') {
+    const d = toWorldDelta(camera, e.clientX - drag.startX, e.clientY - drag.startY);
+    moveX = d.x;
+    moveY = d.y;
+    requestRender();
+    return;
+  }
+  if (drag.kind === 'lasso') {
+    for (const ev of e.getCoalescedEvents?.() ?? [e]) addLassoPoint(ev);
+    requestRender();
     return;
   }
   if (drag.kind === 'pan') {
@@ -460,6 +654,16 @@ function endGesture(e: PointerEvent): void {
   } else if (drag.kind === 'erase') {
     board.removeStrokes(new Set(erasePending));
     erasePending.clear();
+  } else if (drag.kind === 'lasso') {
+    addLassoPoint(e);
+    commitLasso();
+    syncAnts();
+  } else if (drag.kind === 'move' && selection) {
+    // Commit once, as a single undo step, and carry the outline along with it.
+    board.moveStrokes(selection.ids, moveX, moveY);
+    selection.poly = selection.poly.map((p) => ({ x: p.x + moveX, y: p.y + moveY }));
+    moveX = 0;
+    moveY = 0;
   }
   drag = null;
   activePointer = null;
@@ -510,6 +714,15 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'Escape') {
+    clearSelection();
+    return;
+  }
+  if ((e.key === 'Backspace' || e.key === 'Delete') && selection) {
+    deleteSelection();
+    e.preventDefault();
+    return;
+  }
   switch (e.key.toLowerCase()) {
     case 'b':
     case 'p':
@@ -517,6 +730,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'e':
       setTool(tool === 'eraser' ? 'pen' : 'eraser');
+      break;
+    case 's':
+      setTool(tool === 'select' ? 'pen' : 'select');
       break;
     case 'h':
       setTool('hand');
@@ -567,6 +783,7 @@ async function newBoard(): Promise<void> {
     );
     if (!ok) return;
   }
+  clearSelection();
   board.deserialize(EMPTY_BOARD);
   camera.x = -cssWidth / 2;
   camera.y = -cssHeight / 2;
@@ -582,6 +799,7 @@ async function openBoard(): Promise<void> {
   const json = await window.betterboard.openBoard();
   if (!json) return;
   try {
+    clearSelection();
     const saved = board.deserialize(json);
     if (saved) {
       camera.x = saved.x;
@@ -634,6 +852,7 @@ window.betterboard.onMenu((action) => {
       void (async () => {
         if (board.strokes.length === 0) return;
         if (await window.betterboard.confirm('Clear the board?', 'You can undo this.')) {
+          clearSelection();
           board.clear();
         }
       })();
@@ -666,6 +885,7 @@ window.betterboard.onMenu((action) => {
 
 toolButtons.pen.addEventListener('click', () => setTool('pen'));
 toolButtons.eraser.addEventListener('click', () => setTool('eraser'));
+toolButtons.select.addEventListener('click', () => setTool('select'));
 toolButtons.hand.addEventListener('click', () => setTool('hand'));
 
 for (const c of SWATCHES) {
