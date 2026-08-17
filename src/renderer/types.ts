@@ -1,3 +1,8 @@
+export interface Point {
+  x: number;
+  y: number;
+}
+
 export interface StrokePoint {
   x: number;
   y: number;
@@ -35,11 +40,12 @@ export interface Theme {
   bg: string;
   grid: string;
   ink: string;
+  accent: string;
 }
 
 export const THEMES: Record<'dark' | 'light', Theme> = {
-  dark: { bg: '#15161a', grid: '#2b2d35', ink: '#e8eaed' },
-  light: { bg: '#fafafa', grid: '#d4d4d8', ink: '#1e1e24' },
+  dark: { bg: '#15161a', grid: '#2b2d35', ink: '#e8eaed', accent: '#4cc9f0' },
+  light: { bg: '#fafafa', grid: '#d4d4d8', ink: '#1e1e24', accent: '#0ea5c6' },
 };
 
 export const MIN_SCALE = 0.05;
@@ -55,6 +61,21 @@ export function toWorld(camera: Camera, sx: number, sy: number): { x: number; y:
   const ux = sx / camera.scale;
   const uy = sy / camera.scale;
   return { x: camera.x + ux * cos + uy * sin, y: camera.y - ux * sin + uy * cos };
+}
+
+export function toScreen(camera: Camera, wx: number, wy: number): { x: number; y: number } {
+  const cos = Math.cos(camera.rotation);
+  const sin = Math.sin(camera.rotation);
+  const dx = (wx - camera.x) * camera.scale;
+  const dy = (wy - camera.y) * camera.scale;
+  return { x: dx * cos - dy * sin, y: dx * sin + dy * cos };
+}
+
+// Screen-space delta -> world-space delta (undoes rotation and scale).
+export function toWorldDelta(camera: Camera, dx: number, dy: number): { x: number; y: number } {
+  const cos = Math.cos(camera.rotation);
+  const sin = Math.sin(camera.rotation);
+  return { x: (dx * cos + dy * sin) / camera.scale, y: (-dx * sin + dy * cos) / camera.scale };
 }
 
 // Repositions camera.x/y so the world point `w` lands on screen point (sx, sy)
@@ -79,6 +100,26 @@ export function growBBox(b: BBox, x: number, y: number, margin: number): void {
 
 export function bboxIntersects(a: BBox, b: BBox): boolean {
   return a.minX <= b.maxX && a.maxX >= b.minX && a.minY <= b.maxY && a.maxY >= b.minY;
+}
+
+export function polygonBBox(poly: Point[]): BBox {
+  const b = emptyBBox();
+  for (const p of poly) growBBox(b, p.x, p.y, 0);
+  return b;
+}
+
+// Even-odd ray cast. The polygon is treated as closed, so the lasso does not
+// have to be drawn back to its own start.
+export function pointInPolygon(poly: Point[], x: number, y: number): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 export function uid(): string {

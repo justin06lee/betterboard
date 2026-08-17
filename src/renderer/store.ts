@@ -6,7 +6,8 @@ export type Op =
   | { type: 'add'; stroke: Stroke }
   | { type: 'remove'; removed: { index: number; stroke: Stroke }[] }
   | { type: 'clear'; strokes: Stroke[] }
-  | { type: 'scale'; factor: number };
+  | { type: 'scale'; factor: number }
+  | { type: 'move'; ids: string[]; dx: number; dy: number };
 
 const MAX_UNDO = 500;
 
@@ -61,6 +62,37 @@ export class Board {
     this.push({ type: 'scale', factor });
   }
 
+  // Translates a selection. The cached outline is reused under a translation
+  // matrix rather than rebuilt, so dragging stays cheap on large selections.
+  moveStrokes(ids: Set<string>, dx: number, dy: number): void {
+    if (ids.size === 0 || (dx === 0 && dy === 0)) return;
+    const list = [...ids];
+    this.applyMove(list, dx, dy);
+    this.push({ type: 'move', ids: list, dx, dy });
+  }
+
+  private applyMove(ids: string[], dx: number, dy: number): void {
+    const set = new Set(ids);
+    for (const s of this.strokes) {
+      if (!set.has(s.id)) continue;
+      for (const pt of s.points) {
+        pt.x += dx;
+        pt.y += dy;
+      }
+      s.bbox = {
+        minX: s.bbox.minX + dx,
+        minY: s.bbox.minY + dy,
+        maxX: s.bbox.maxX + dx,
+        maxY: s.bbox.maxY + dy,
+      };
+      if (s.path) {
+        const moved = new Path2D();
+        moved.addPath(s.path, new DOMMatrix().translate(dx, dy));
+        s.path = moved;
+      }
+    }
+  }
+
   private applyScale(f: number): void {
     for (const s of this.strokes) {
       for (const pt of s.points) {
@@ -94,6 +126,8 @@ export class Board {
       }
     } else if (op.type === 'clear') {
       this.strokes = op.strokes;
+    } else if (op.type === 'move') {
+      this.applyMove(op.ids, -op.dx, -op.dy);
     } else {
       this.applyScale(1 / op.factor);
     }
@@ -112,6 +146,8 @@ export class Board {
       this.strokes = this.strokes.filter((s) => !ids.has(s.id));
     } else if (op.type === 'clear') {
       this.strokes = [];
+    } else if (op.type === 'move') {
+      this.applyMove(op.ids, op.dx, op.dy);
     } else {
       this.applyScale(op.factor);
     }

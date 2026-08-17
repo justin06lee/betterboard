@@ -1,11 +1,23 @@
-import type { BBox, Camera, Stroke, Theme } from './types';
-import { bboxIntersects, emptyBBox, growBBox, toWorld } from './types';
+import type { BBox, Camera, Point, Stroke, Theme } from './types';
+import { bboxIntersects, emptyBBox, growBBox, toScreen, toWorld } from './types';
+
+// The lasso being drawn, or a committed selection being dragged. `poly` is in
+// world coordinates; `dx`/`dy` is the in-progress move offset, also in world
+// units, applied to both the outline and the strokes it holds.
+export interface Marquee {
+  poly: Point[];
+  ids: Set<string> | null;
+  dx: number;
+  dy: number;
+  dashOffset: number;
+}
 
 export interface RenderOpts {
   theme: Theme;
   grid: boolean;
   live: Stroke | null;
   eraser: { x: number; y: number; radius: number } | null; // screen coords
+  marquee: Marquee | null;
 }
 
 const GRID_BASE = 40; // world units between dots at scale 1
@@ -32,6 +44,43 @@ function drawGrid(ctx: CanvasRenderingContext2D, camera: Camera, view: BBox, col
     }
   }
   ctx.globalAlpha = 1;
+}
+
+// Drawn in screen space: the dashes keep the same on-screen size at any zoom,
+// and the marching-ants offset reads the same whichever way the canvas is turned.
+function drawMarquee(
+  ctx: CanvasRenderingContext2D,
+  camera: Camera,
+  m: Marquee,
+  theme: Theme
+): void {
+  if (m.poly.length < 2) return;
+  ctx.beginPath();
+  for (let i = 0; i < m.poly.length; i++) {
+    const p = toScreen(camera, m.poly[i].x + m.dx, m.poly[i].y + m.dy);
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.closePath();
+
+  ctx.fillStyle = theme.accent;
+  ctx.globalAlpha = 0.09;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // A dark underlay keeps the dashes legible over ink of any color.
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = theme.bg;
+  ctx.globalAlpha = 0.55;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  ctx.setLineDash([5, 4]);
+  ctx.lineDashOffset = m.dashOffset;
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = theme.accent;
+  ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 export function render(
@@ -74,10 +123,29 @@ export function render(
     -k * (sin * camera.x + cos * camera.y)
   );
   if (opts.grid) drawGrid(ctx, camera, view, opts.theme.grid);
+
+  // Strokes being dragged are lifted out of the main pass and redrawn under a
+  // translation, so a move costs one extra transform rather than a rebuild.
+  const m = opts.marquee;
+  const moving = m && m.ids && (m.dx !== 0 || m.dy !== 0) ? m.ids : null;
   for (const s of strokes) {
-    if (!s.path || !bboxIntersects(s.bbox, view)) continue;
+    if (!s.path || (moving?.has(s.id) ?? false) || !bboxIntersects(s.bbox, view)) continue;
     ctx.fillStyle = s.color;
     ctx.fill(s.path);
+  }
+  if (moving && m) {
+    ctx.save();
+    ctx.translate(m.dx, m.dy);
+    for (const s of strokes) {
+      if (!s.path || !moving.has(s.id)) continue;
+      const b = s.bbox;
+      if (!bboxIntersects({ minX: b.minX + m.dx, minY: b.minY + m.dy, maxX: b.maxX + m.dx, maxY: b.maxY + m.dy }, view)) {
+        continue;
+      }
+      ctx.fillStyle = s.color;
+      ctx.fill(s.path);
+    }
+    ctx.restore();
   }
   if (opts.live?.path) {
     ctx.fillStyle = opts.live.color;
@@ -86,6 +154,7 @@ export function render(
 
   // Screen-space overlay.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (opts.marquee) drawMarquee(ctx, camera, opts.marquee, opts.theme);
   if (opts.eraser) {
     ctx.beginPath();
     ctx.arc(opts.eraser.x, opts.eraser.y, opts.eraser.radius, 0, Math.PI * 2);
