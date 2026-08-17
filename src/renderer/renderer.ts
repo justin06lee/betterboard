@@ -2,7 +2,7 @@ import { buildPath, strokeHit } from './ink';
 import { render, renderExport } from './render';
 import { Board } from './store';
 import type { Camera, Stroke } from './types';
-import { MIN_SCALE, THEMES, clampScale, emptyBBox, growBBox, toWorld, uid } from './types';
+import { MIN_SCALE, THEMES, anchorCamera, clampScale, emptyBBox, growBBox, toWorld, uid } from './types';
 
 type Tool = 'pen' | 'eraser' | 'hand';
 type ThemeName = 'dark' | 'light';
@@ -15,7 +15,7 @@ const EMPTY_BOARD = '{"app":"betterboard","version":1,"strokes":[]}';
 // ---- state ----------------------------------------------------------------
 
 const board = new Board();
-const camera: Camera = { x: 0, y: 0, scale: 1 };
+const camera: Camera = { x: 0, y: 0, scale: 1, rotation: 0 };
 let tool: Tool = 'pen';
 let color = SWATCHES[0];
 let size = 6;
@@ -129,8 +129,7 @@ function zoomAt(sx: number, sy: number, factor: number): void {
   if (factor < 1 && camera.scale <= MIN_SCALE) nudgeNormalize();
   const w = toWorld(camera, sx, sy);
   camera.scale = clampScale(camera.scale * factor);
-  camera.x = w.x - sx / camera.scale;
-  camera.y = w.y - sy / camera.scale;
+  anchorCamera(camera, w, sx, sy);
   updateZoomLabel();
   requestRender();
   scheduleAutosave();
@@ -141,14 +140,15 @@ function zoomTo(scale: number): void {
   const cy = cssHeight / 2;
   const w = toWorld(camera, cx, cy);
   camera.scale = clampScale(scale);
-  camera.x = w.x - cx / camera.scale;
-  camera.y = w.y - cy / camera.scale;
+  anchorCamera(camera, w, cx, cy);
   updateZoomLabel();
   requestRender();
   scheduleAutosave();
 }
 
 function zoomFit(): void {
+  camera.rotation = 0; // fit re-frames everything axis-aligned
+  updateWheel();
   const b = board.contentBBox();
   if (!b) {
     camera.scale = 1;
@@ -212,6 +212,67 @@ function doRedo(): void {
     requestRender();
   }
 }
+
+// ---- rotation wheel ---------------------------------------------------------
+
+const rotWheel = $('rot-wheel');
+const rotKnob = $('rot-knob');
+const rotLabel = $('rot-label');
+let rHeld = false;
+let rotDragging = false;
+let rotGrabAngle = 0;
+let rotStart = 0;
+
+function updateWheel(): void {
+  rotWheel.classList.toggle('hidden', !(rHeld || rotDragging));
+  const deg = (camera.rotation * 180) / Math.PI;
+  rotKnob.style.transform = `rotate(${deg}deg) translateY(-70px)`;
+  rotLabel.textContent = `${Math.round(((deg % 360) + 360) % 360)}°`;
+}
+
+function setRotation(theta: number): void {
+  const step = Math.PI / 4;
+  const nearest = Math.round(theta / step) * step;
+  if (Math.abs(theta - nearest) < (4 * Math.PI) / 180) theta = nearest;
+  // Pivot around the screen center: the world point there stays put.
+  const cx = cssWidth / 2;
+  const cy = cssHeight / 2;
+  const w = toWorld(camera, cx, cy);
+  camera.rotation = theta;
+  anchorCamera(camera, w, cx, cy);
+  updateWheel();
+  requestRender();
+  scheduleAutosave();
+}
+
+// Pointer angle around the wheel center, clockwise from 12 o'clock.
+function wheelPointerAngle(e: PointerEvent): number {
+  const r = rotWheel.getBoundingClientRect();
+  const dx = e.clientX - (r.left + r.width / 2);
+  const dy = e.clientY - (r.top + r.height / 2);
+  return Math.atan2(dx, -dy);
+}
+
+rotWheel.addEventListener('pointerdown', (e) => {
+  rotDragging = true;
+  rotGrabAngle = wheelPointerAngle(e);
+  rotStart = camera.rotation;
+  rotWheel.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+rotWheel.addEventListener('pointermove', (e) => {
+  if (!rotDragging) return;
+  setRotation(rotStart + wheelPointerAngle(e) - rotGrabAngle);
+});
+function endRotDrag(): void {
+  if (!rotDragging) return;
+  rotDragging = false;
+  camera.rotation = Math.atan2(Math.sin(camera.rotation), Math.cos(camera.rotation));
+  updateWheel();
+}
+rotWheel.addEventListener('pointerup', endRotDrag);
+rotWheel.addEventListener('pointercancel', endRotDrag);
+rotWheel.addEventListener('dblclick', () => setRotation(0));
 
 // ---- ui sync --------------------------------------------------------------
 
@@ -366,8 +427,12 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
   if (drag.kind === 'pan') {
-    camera.x = drag.camX - (e.clientX - drag.startX) / camera.scale;
-    camera.y = drag.camY - (e.clientY - drag.startY) / camera.scale;
+    const cos = Math.cos(camera.rotation);
+    const sin = Math.sin(camera.rotation);
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    camera.x = drag.camX - (dx * cos + dy * sin) / camera.scale;
+    camera.y = drag.camY - (-dx * sin + dy * cos) / camera.scale;
     requestRender();
     scheduleAutosave();
     return;
@@ -420,8 +485,10 @@ canvas.addEventListener(
     if (e.ctrlKey || e.metaKey) {
       zoomAt(e.offsetX, e.offsetY, Math.exp(-e.deltaY * 0.01));
     } else {
-      camera.x += e.deltaX / camera.scale;
-      camera.y += e.deltaY / camera.scale;
+      const cos = Math.cos(camera.rotation);
+      const sin = Math.sin(camera.rotation);
+      camera.x += (e.deltaX * cos + e.deltaY * sin) / camera.scale;
+      camera.y += (-e.deltaX * sin + e.deltaY * cos) / camera.scale;
       requestRender();
       scheduleAutosave();
     }
@@ -462,6 +529,12 @@ window.addEventListener('keydown', (e) => {
       sizeInput.value = String(Math.min(28, size + 1));
       sizeInput.dispatchEvent(new Event('input'));
       break;
+    case 'r':
+      if (!rHeld) {
+        rHeld = true;
+        updateWheel();
+      }
+      break;
   }
 });
 
@@ -470,6 +543,18 @@ window.addEventListener('keyup', (e) => {
     spaceHeld = false;
     updateCursor();
   }
+  if (e.key.toLowerCase() === 'r') {
+    rHeld = false;
+    updateWheel();
+  }
+});
+
+// A lost keyup (app switch mid-hold) must not leave the wheel stuck on screen.
+window.addEventListener('blur', () => {
+  rHeld = false;
+  spaceHeld = false;
+  updateWheel();
+  updateCursor();
 });
 
 // ---- menu / file actions --------------------------------------------------
@@ -486,6 +571,8 @@ async function newBoard(): Promise<void> {
   camera.x = -cssWidth / 2;
   camera.y = -cssHeight / 2;
   camera.scale = 1;
+  camera.rotation = 0;
+  updateWheel();
   updateZoomLabel();
   requestRender();
   scheduleAutosave();
@@ -500,6 +587,8 @@ async function openBoard(): Promise<void> {
       camera.x = saved.x;
       camera.y = saved.y;
       camera.scale = saved.scale;
+      camera.rotation = saved.rotation;
+      updateWheel();
       updateZoomLabel();
       requestRender();
     } else {
@@ -644,6 +733,7 @@ async function main(): Promise<void> {
         camera.x = cam.x;
         camera.y = cam.y;
         camera.scale = cam.scale;
+        camera.rotation = cam.rotation;
         restored = true;
       }
     } catch {}
@@ -653,6 +743,7 @@ async function main(): Promise<void> {
     camera.y = -cssHeight / 2;
     camera.scale = 1;
   }
+  updateWheel();
   updateZoomLabel();
   requestRender();
 }
