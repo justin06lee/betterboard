@@ -21,9 +21,23 @@ export interface Stroke {
   color: string;
   size: number; // base diameter in world units
   pen: boolean; // true if drawn with real pressure (stylus), false for mouse
+  layer: string; // id of the owning layer
   points: StrokePoint[];
   bbox: BBox;
   path?: Path2D; // cached outline, world coordinates
+}
+
+// Layers are held bottom-first: layers[0] paints under everything. The panel
+// lists them the other way up, the way every other drawing app does.
+export interface Layer {
+  id: string;
+  name: string;
+  opacity: number; // 0..1, applied to the layer as a whole
+  visible: boolean;
+}
+
+export function newLayer(name: string): Layer {
+  return { id: uid(), name, opacity: 1, visible: true };
 }
 
 // camera.x/y = world coordinates of the screen origin (top-left);

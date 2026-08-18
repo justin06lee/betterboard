@@ -20,6 +20,7 @@ betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designe
 - **Stylus-native gestures** — the pen's eraser end erases, the barrel button pans, touch pans
 - **Stroke eraser** — removes whole strokes, one undo step per gesture
 - **Lasso select** — loop your pen around anything to select it, then drag the marching-ants outline to move it; `⌫` deletes the selection, `Esc` drops it
+- **Layers** — add, delete, rename, reorder by dragging, hide, and dim. Opacity composites the finished layer rather than each stroke, so overlaps never show seams — drop a sketch to 30% and ink over it cleanly. Drawing, erasing and selecting stay on the active layer, so what's underneath is safe
 - **Normalize zoom** — one press rebases the current view as the new 100%, restoring the full zoom range without moving a pixel; when you hit the zoom-out floor, the button pulses to offer it
 - **Undo / redo**, dark & light board themes, autosave and session restore
 - **Save / open** boards as JSON, **export** the whole drawing as PNG
@@ -62,6 +63,10 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Normalize zoom | `⇧⌘N` or the ⤢ button in the zoom pill |
 | Rotate | hold `R` and drag the dial — snaps near 45° steps; double-click the dial to reset, `⌘1` also squares the view |
 | Tools | `B`/`P` pen · `E` toggles eraser/pen · `S` toggles lasso/pen · `H` hand |
+| Layers panel | `L` or `⌘L` |
+| New / delete layer | `⌥⌘N` / `⌥⌘⌫`, or `+` and 🗑 in the panel |
+| Hide / show a layer | The eye on its row, or `⌥⌘H` for the active one |
+| Layer opacity · rename · reorder | The panel slider · double-click its name · drag its row |
 | Stroke size | `[` and `]` or the slider |
 | Undo / redo | `⌘Z` / `⇧⌘Z` |
 | New / open / save / export | `⌘N` / `⌘O` / `⌘S` / `⌘E` |
@@ -70,7 +75,7 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 
 ## File format
 
-Boards are JSON: a list of strokes (`color`, `size`, and `[x, y, pressure]` points in world coordinates) plus the camera. Autosaves land in the app's user-data directory; `⌘S` exports a portable `.betterboard.json`.
+Boards are JSON (version 2): a list of layers (`name`, `opacity`, `visible`, bottom-first) and a list of strokes (`color`, `size`, owning `layer`, and `[x, y, pressure]` points in world coordinates) plus the camera. Version 1 files — which predate layers — still open, and everything in them lands on a single layer. Autosaves go to the app's user-data directory; `⌘S` exports a portable `.betterboard.json`.
 
 ## Roadmap
 
