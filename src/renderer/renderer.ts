@@ -37,6 +37,7 @@ let color = SWATCHES[0];
 let size = 6;
 let themeName: ThemeName = 'dark';
 let grid = true;
+let layersOpen = true;
 
 let live: Stroke | null = null;
 let spaceHeld = false;
@@ -87,6 +88,13 @@ const gridBtn = $('grid-btn');
 const themeBtn = $('theme-btn');
 const zoomLabel = $('zoom-label');
 const normalizeBtn = $('normalize') as HTMLButtonElement;
+const layersBtn = $('layers-btn');
+const layersPanel = $('layers');
+const layerList = $('layer-list');
+const layerAddBtn = $('layer-add') as HTMLButtonElement;
+const layerDeleteBtn = $('layer-delete') as HTMLButtonElement;
+const layerOpacityInput = $('layer-opacity') as HTMLInputElement;
+const layerOpacityVal = $('layer-opacity-val');
 
 // ---- rendering loop -------------------------------------------------------
 
@@ -112,6 +120,8 @@ function requestRender(): void {
         : selection
           ? { poly: selection.poly, ids: selection.ids, dx: moveX, dy: moveY, dashOffset }
           : null,
+      layers: board.layers,
+      activeLayer: board.activeLayer,
     });
   });
 }
@@ -137,7 +147,7 @@ function scheduleAutosave(): void {
 }
 
 function savePrefs(): void {
-  localStorage.setItem('bb:prefs', JSON.stringify({ tool, color, size, themeName, grid }));
+  localStorage.setItem('bb:prefs', JSON.stringify({ tool, color, size, themeName, grid, layersOpen }));
 }
 
 function loadPrefs(): void {
@@ -150,6 +160,7 @@ function loadPrefs(): void {
     if (Number.isFinite(p.size)) size = Math.min(28, Math.max(1, p.size));
     if (p.themeName === 'light' || p.themeName === 'dark') themeName = p.themeName;
     if (typeof p.grid === 'boolean') grid = p.grid;
+    if (typeof p.layersOpen === 'boolean') layersOpen = p.layersOpen;
   } catch {}
 }
 
@@ -186,7 +197,7 @@ function zoomTo(scale: number): void {
 function zoomFit(): void {
   camera.rotation = 0; // fit re-frames everything axis-aligned
   updateWheel();
-  const b = board.contentBBox();
+  const b = board.contentBBox(board.visibleStrokes());
   if (!b) {
     camera.scale = 1;
     camera.x = -cssWidth / 2;
@@ -422,6 +433,7 @@ function startStroke(e: PointerEvent): void {
     color,
     size,
     pen: e.pointerType === 'pen',
+    layer: board.activeLayer,
     points: [{ x: w.x, y: w.y, p: pressureOf(e) }],
     bbox: emptyBBox(),
   };
@@ -437,15 +449,192 @@ function finishStroke(): void {
   live = null;
 }
 
+// Erasing, like every other edit, is confined to the active layer — that is
+// what layers are for, and it keeps a traced-over sketch safe underneath.
 function eraseAt(e: PointerEvent): void {
   const w = toWorld(camera, e.offsetX, e.offsetY);
   const radius = ERASER_RADIUS / camera.scale;
   for (const s of board.strokes) {
+    if (s.layer !== board.activeLayer) continue;
     if (!erasePending.has(s.id) && strokeHit(s, w.x, w.y, radius)) {
       erasePending.add(s.id);
     }
   }
 }
+
+// ---- layers panel ---------------------------------------------------------
+
+const EYE_ON =
+  '<svg viewBox="0 0 24 24"><path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12z" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>';
+const EYE_OFF =
+  '<svg viewBox="0 0 24 24"><path d="M4 4l16 16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M9.8 6.1A9.6 9.6 0 0 1 12 5.8c6 0 9.5 6.2 9.5 6.2a17 17 0 0 1-3 3.7M6.6 7.9A16.6 16.6 0 0 0 2.5 12S6 18.2 12 18.2a9.4 9.4 0 0 0 3.3-.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+
+// Rows are listed top layer first, the way every drawing app shows them, so
+// display index and model index are mirror images of each other.
+function modelIndex(displayIndex: number): number {
+  return board.layers.length - 1 - displayIndex;
+}
+
+let layerDrag: { id: string; startY: number; moved: boolean } | null = null;
+let renamingId: string | null = null;
+
+function renderLayers(): void {
+  if (layerDrag?.moved || renamingId) return; // never yank the DOM out from under an interaction
+  layerList.textContent = '';
+  const counts = new Map<string, number>();
+  for (const s of board.strokes) counts.set(s.layer, (counts.get(s.layer) ?? 0) + 1);
+
+  for (let i = board.layers.length - 1; i >= 0; i--) {
+    const layer = board.layers[i];
+    const row = document.createElement('div');
+    row.className = 'layer-row' + (layer.id === board.activeLayer ? ' active' : '');
+    row.dataset.id = layer.id;
+
+    const eye = document.createElement('button');
+    eye.className = 'layer-eye' + (layer.visible ? '' : ' off');
+    eye.innerHTML = layer.visible ? EYE_ON : EYE_OFF;
+    eye.title = layer.visible ? 'Hide layer' : 'Show layer';
+    eye.addEventListener('pointerdown', (e) => e.stopPropagation());
+    eye.addEventListener('click', (e) => {
+      e.stopPropagation();
+      board.setLayerVisible(layer.id, !layer.visible);
+      if (!layer.visible && layer.id === board.activeLayer) clearSelection();
+    });
+
+    const name = document.createElement('span');
+    name.className = 'layer-name';
+    name.textContent = layer.name;
+    name.title = `${layer.name} — double-click to rename`;
+
+    const count = document.createElement('span');
+    count.className = 'layer-count';
+    count.textContent = String(counts.get(layer.id) ?? 0);
+
+    row.append(eye, name, count);
+    row.addEventListener('pointerdown', (e) => beginLayerDrag(e, layer.id));
+    // Bound on the row, not the name: activating a layer rebuilds these rows
+    // between the two clicks, so the pair only shares the row as a target.
+    row.addEventListener('dblclick', (e) => {
+      if (renamingId || (e.target as HTMLElement).closest('.layer-eye')) return;
+      startRename(row, layer.id, layer.name);
+    });
+    layerList.appendChild(row);
+  }
+
+  const active = board.active;
+  layerOpacityInput.value = String(Math.round(active.opacity * 100));
+  layerOpacityVal.textContent = `${Math.round(active.opacity * 100)}%`;
+  layerDeleteBtn.disabled = board.layers.length <= 1;
+}
+
+function startRename(row: HTMLElement, id: string, current: string): void {
+  const input = document.createElement('input');
+  input.className = 'layer-name';
+  input.value = current;
+  renamingId = id;
+  row.replaceChild(input, row.children[1]);
+  input.focus();
+  input.select();
+  const commit = (save: boolean) => {
+    if (renamingId !== id) return;
+    renamingId = null;
+    if (save) board.renameLayer(id, input.value);
+    renderLayers();
+  };
+  input.addEventListener('blur', () => commit(true));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') commit(true);
+    else if (e.key === 'Escape') commit(false);
+    e.stopPropagation();
+  });
+}
+
+// Reordering moves the row through the list as the pointer crosses its
+// neighbours, then commits the finished order as one undoable step.
+function beginLayerDrag(e: PointerEvent, id: string): void {
+  if (e.button !== 0 || renamingId) return;
+  if (id !== board.activeLayer) clearSelection();
+  board.setActiveLayer(id); // this rebuilds the rows, so the list holds the capture
+  layerDrag = { id, startY: e.clientY, moved: false };
+  layerList.setPointerCapture(e.pointerId);
+}
+
+layerList.addEventListener('pointermove', (e) => {
+  if (!layerDrag) return;
+  const row = layerList.querySelector<HTMLElement>(`.layer-row[data-id="${layerDrag.id}"]`);
+  if (!row) return;
+  if (!layerDrag.moved) {
+    if (Math.abs(e.clientY - layerDrag.startY) < 5) return;
+    layerDrag.moved = true;
+    row.classList.add('dragging');
+  }
+  for (const other of layerList.querySelectorAll<HTMLElement>('.layer-row')) {
+    if (other === row) continue;
+    const r = other.getBoundingClientRect();
+    if (e.clientY < r.top + r.height / 2 && other.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      layerList.insertBefore(row, other);
+      break;
+    }
+    if (e.clientY > r.top + r.height / 2 && other.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_PRECEDING) {
+      layerList.insertBefore(row, other.nextSibling);
+      break;
+    }
+  }
+});
+
+function endLayerDrag(): void {
+  if (!layerDrag) return;
+  const { id, moved } = layerDrag;
+  layerDrag = null;
+  if (!moved) return;
+  const rows = [...layerList.querySelectorAll<HTMLElement>('.layer-row')];
+  const to = modelIndex(rows.findIndex((r) => r.dataset.id === id));
+  const from = board.layers.findIndex((l) => l.id === id);
+  board.moveLayer(from, to);
+  renderLayers();
+}
+
+layerList.addEventListener('pointerup', endLayerDrag);
+layerList.addEventListener('pointercancel', endLayerDrag);
+
+function setLayersOpen(open: boolean): void {
+  layersOpen = open;
+  layersPanel.classList.toggle('hidden', !open);
+  layersBtn.classList.toggle('active', open);
+  savePrefs();
+}
+
+// Drawing on a hidden layer would go nowhere visible, so it is refused and the
+// row is flashed instead of silently swallowing the stroke.
+function flashActiveLayer(): void {
+  if (!layersOpen) setLayersOpen(true);
+  const row = layerList.querySelector<HTMLElement>(`.layer-row[data-id="${board.activeLayer}"]`);
+  if (!row) return;
+  row.classList.remove('flash');
+  void row.offsetWidth; // restart the animation
+  row.classList.add('flash');
+  setTimeout(() => row.classList.remove('flash'), 1100);
+}
+
+function canEditActive(): boolean {
+  if (board.active.visible) return true;
+  flashActiveLayer();
+  return false;
+}
+
+layerAddBtn.addEventListener('click', () => {
+  clearSelection();
+  board.addLayer();
+});
+layerDeleteBtn.addEventListener('click', () => {
+  clearSelection();
+  board.removeLayer(board.activeLayer);
+});
+layersBtn.addEventListener('click', () => setLayersOpen(!layersOpen));
+layerOpacityInput.addEventListener('input', () => {
+  board.setLayerOpacity(board.activeLayer, Number(layerOpacityInput.value) / 100);
+  layerOpacityVal.textContent = `${layerOpacityInput.value}%`;
+});
 
 // ---- lasso selection ------------------------------------------------------
 
@@ -494,7 +683,7 @@ function strokesInside(poly: Point[]): Set<string> {
   const ids = new Set<string>();
   const box = polygonBBox(poly);
   for (const s of board.strokes) {
-    if (!bboxIntersects(s.bbox, box)) continue;
+    if (s.layer !== board.activeLayer || !bboxIntersects(s.bbox, box)) continue;
     let hits = 0;
     for (const pt of s.points) {
       if (pointInPolygon(poly, pt.x, pt.y)) hits++;
@@ -510,7 +699,7 @@ function selectAt(w: Point): void {
   const radius = 8 / camera.scale;
   for (let i = board.strokes.length - 1; i >= 0; i--) {
     const s = board.strokes[i];
-    if (!strokeHit(s, w.x, w.y, radius)) continue;
+    if (s.layer !== board.activeLayer || !strokeHit(s, w.x, w.y, radius)) continue;
     const pad = 6 / camera.scale;
     const b = s.bbox;
     selection = {
@@ -559,6 +748,8 @@ canvas.addEventListener('pointerdown', (e) => {
     tool === 'hand';
   const eraseWanted =
     !panWanted && ((e.pointerType === 'pen' && (e.buttons & 32) !== 0) || tool === 'eraser');
+
+  if (!panWanted && !canEditActive()) return;
 
   if (panWanted) {
     drag = { kind: 'pan', startX: e.clientX, startY: e.clientY, camX: camera.x, camY: camera.y };
@@ -737,6 +928,9 @@ window.addEventListener('keydown', (e) => {
     case 'h':
       setTool('hand');
       break;
+    case 'l':
+      setLayersOpen(!layersOpen);
+      break;
     case '[':
       sizeInput.value = String(Math.max(1, size - 1));
       sizeInput.dispatchEvent(new Event('input'));
@@ -819,9 +1013,10 @@ async function openBoard(): Promise<void> {
 }
 
 async function exportPNG(): Promise<void> {
-  const content = board.contentBBox();
+  const visible = board.visibleStrokes();
+  const content = board.contentBBox(visible);
   if (!content) return;
-  const exportCanvas = renderExport(board.strokes, content, THEMES[themeName]);
+  const exportCanvas = renderExport(visible, board.layers, content, THEMES[themeName]);
   await window.betterboard.exportPNG(exportCanvas.toDataURL('image/png'));
 }
 
@@ -877,6 +1072,22 @@ window.betterboard.onMenu((action) => {
       break;
     case 'toggle-theme':
       toggleTheme();
+      break;
+    case 'toggle-layers':
+      setLayersOpen(!layersOpen);
+      break;
+    case 'layer-new':
+      clearSelection();
+      board.addLayer();
+      if (!layersOpen) setLayersOpen(true);
+      break;
+    case 'layer-delete':
+      clearSelection();
+      board.removeLayer(board.activeLayer);
+      break;
+    case 'layer-toggle-visible':
+      board.setLayerVisible(board.activeLayer, !board.active.visible);
+      clearSelection();
       break;
   }
 });
@@ -939,8 +1150,10 @@ async function main(): Promise<void> {
     requestRender();
     scheduleAutosave();
     updateUndoButtons();
+    renderLayers();
   };
   updateUndoButtons();
+  setLayersOpen(layersOpen);
 
   window.addEventListener('resize', resizeCanvas);
   resizeCanvas();
@@ -966,6 +1179,7 @@ async function main(): Promise<void> {
   }
   updateWheel();
   updateZoomLabel();
+  renderLayers();
   requestRender();
 }
 

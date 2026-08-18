@@ -93,6 +93,16 @@ function buildMenu() {
       ],
     },
     {
+      label: 'Layer',
+      submenu: [
+        { label: 'New Layer', accelerator: 'CmdOrCtrl+Alt+N', click: () => send('layer-new') },
+        { label: 'Delete Layer', accelerator: 'CmdOrCtrl+Alt+Backspace', click: () => send('layer-delete') },
+        { type: 'separator' },
+        { label: 'Hide/Show Layer', accelerator: 'CmdOrCtrl+Alt+H', click: () => send('layer-toggle-visible') },
+        { label: 'Layers Panel', accelerator: 'CmdOrCtrl+L', click: () => send('toggle-layers') },
+      ],
+    },
+    {
       label: 'View',
       submenu: [
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => send('zoom-in') },

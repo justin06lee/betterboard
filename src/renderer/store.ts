@@ -1,18 +1,25 @@
 import { buildPath } from './ink';
-import type { BBox, Camera, Stroke } from './types';
-import { emptyBBox, growBBox } from './types';
+import type { BBox, Camera, Layer, Stroke } from './types';
+import { emptyBBox, growBBox, newLayer } from './types';
 
 export type Op =
   | { type: 'add'; stroke: Stroke }
   | { type: 'remove'; removed: { index: number; stroke: Stroke }[] }
   | { type: 'clear'; strokes: Stroke[] }
   | { type: 'scale'; factor: number }
-  | { type: 'move'; ids: string[]; dx: number; dy: number };
+  | { type: 'move'; ids: string[]; dx: number; dy: number }
+  | { type: 'layer-add'; index: number; layer: Layer }
+  | { type: 'layer-remove'; index: number; layer: Layer; removed: { index: number; stroke: Stroke }[] }
+  | { type: 'layer-order'; from: number; to: number };
 
 const MAX_UNDO = 500;
 
 export class Board {
+  // Flat, in draw order within a layer; cross-layer order comes from `layers`,
+  // so a stroke never has to move in this array when layers are reordered.
   strokes: Stroke[] = [];
+  layers: Layer[] = [newLayer('Layer 1')];
+  activeLayer: string = this.layers[0].id;
   private undoStack: Op[] = [];
   private redoStack: Op[] = [];
   onChange: (() => void) | null = null;
@@ -31,6 +38,100 @@ export class Board {
   addStroke(stroke: Stroke): void {
     this.strokes.push(stroke);
     this.push({ type: 'add', stroke });
+  }
+
+  // ---- layers -------------------------------------------------------------
+
+  layer(id: string): Layer | undefined {
+    return this.layers.find((l) => l.id === id);
+  }
+
+  get active(): Layer {
+    return this.layer(this.activeLayer) ?? this.layers[this.layers.length - 1];
+  }
+
+  strokesOn(id: string): Stroke[] {
+    return this.strokes.filter((s) => s.layer === id);
+  }
+
+  visibleStrokes(): Stroke[] {
+    const hidden = new Set(this.layers.filter((l) => !l.visible).map((l) => l.id));
+    return hidden.size === 0 ? this.strokes : this.strokes.filter((s) => !hidden.has(s.layer));
+  }
+
+  setActiveLayer(id: string): void {
+    if (!this.layer(id) || id === this.activeLayer) return;
+    this.activeLayer = id;
+    this.changed();
+  }
+
+  // Named after the layer it sits above, so the numbering stays sensible as
+  // layers come and go.
+  addLayer(): Layer {
+    let n = this.layers.length + 1;
+    while (this.layers.some((l) => l.name === `Layer ${n}`)) n++;
+    const layer = newLayer(`Layer ${n}`);
+    const index = this.layers.findIndex((l) => l.id === this.activeLayer) + 1;
+    this.layers.splice(index, 0, layer);
+    this.activeLayer = layer.id;
+    this.push({ type: 'layer-add', index, layer });
+    return layer;
+  }
+
+  // Removing a layer takes its strokes with it; both come back together on undo.
+  removeLayer(id: string): boolean {
+    if (this.layers.length <= 1) return false;
+    const index = this.layers.findIndex((l) => l.id === id);
+    if (index < 0) return false;
+    const layer = this.layers[index];
+    const removed: { index: number; stroke: Stroke }[] = [];
+    for (let i = 0; i < this.strokes.length; i++) {
+      if (this.strokes[i].layer === id) removed.push({ index: i, stroke: this.strokes[i] });
+    }
+    this.layers.splice(index, 1);
+    this.strokes = this.strokes.filter((s) => s.layer !== id);
+    if (this.activeLayer === id) {
+      this.activeLayer = this.layers[Math.min(index, this.layers.length - 1)].id;
+    }
+    this.push({ type: 'layer-remove', index, layer, removed });
+    return true;
+  }
+
+  moveLayer(from: number, to: number): void {
+    if (from === to || from < 0 || to < 0 || from >= this.layers.length || to >= this.layers.length) {
+      return;
+    }
+    this.applyLayerMove(from, to);
+    this.push({ type: 'layer-order', from, to });
+  }
+
+  private applyLayerMove(from: number, to: number): void {
+    const [layer] = this.layers.splice(from, 1);
+    this.layers.splice(to, 0, layer);
+  }
+
+  // Opacity and visibility are view switches rather than edits: they redraw and
+  // autosave, but they do not land on the undo stack (nor clear the redo one).
+  setLayerOpacity(id: string, opacity: number): void {
+    const layer = this.layer(id);
+    if (!layer) return;
+    layer.opacity = Math.min(1, Math.max(0, opacity));
+    this.changed();
+  }
+
+  setLayerVisible(id: string, visible: boolean): void {
+    const layer = this.layer(id);
+    if (!layer || layer.visible === visible) return;
+    layer.visible = visible;
+    this.changed();
+  }
+
+  renameLayer(id: string, name: string): void {
+    const layer = this.layer(id);
+    const trimmed = name.trim();
+    if (!layer || !trimmed || layer.name === trimmed) return;
+    layer.name = trimmed.slice(0, 40);
+    this.changed();
   }
 
   // Removes strokes by id; a single gesture's erasures collapse into one undo step.
@@ -128,6 +229,19 @@ export class Board {
       this.strokes = op.strokes;
     } else if (op.type === 'move') {
       this.applyMove(op.ids, -op.dx, -op.dy);
+    } else if (op.type === 'layer-add') {
+      this.layers.splice(op.index, 1);
+      if (this.activeLayer === op.layer.id) {
+        this.activeLayer = this.layers[Math.min(op.index, this.layers.length - 1)].id;
+      }
+    } else if (op.type === 'layer-remove') {
+      this.layers.splice(op.index, 0, op.layer);
+      for (const { index, stroke } of op.removed) {
+        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
+      }
+      this.activeLayer = op.layer.id;
+    } else if (op.type === 'layer-order') {
+      this.applyLayerMove(op.to, op.from);
     } else {
       this.applyScale(1 / op.factor);
     }
@@ -148,6 +262,18 @@ export class Board {
       this.strokes = [];
     } else if (op.type === 'move') {
       this.applyMove(op.ids, op.dx, op.dy);
+    } else if (op.type === 'layer-add') {
+      this.layers.splice(op.index, 0, op.layer);
+      this.activeLayer = op.layer.id;
+    } else if (op.type === 'layer-remove') {
+      const ids = new Set(op.removed.map((r) => r.stroke.id));
+      this.layers.splice(op.index, 1);
+      this.strokes = this.strokes.filter((s) => !ids.has(s.id));
+      if (this.activeLayer === op.layer.id) {
+        this.activeLayer = this.layers[Math.min(op.index, this.layers.length - 1)].id;
+      }
+    } else if (op.type === 'layer-order') {
+      this.applyLayerMove(op.from, op.to);
     } else {
       this.applyScale(op.factor);
     }
@@ -156,10 +282,10 @@ export class Board {
     return op;
   }
 
-  contentBBox(): BBox | null {
-    if (this.strokes.length === 0) return null;
+  contentBBox(strokes: Stroke[] = this.strokes): BBox | null {
+    if (strokes.length === 0) return null;
     const b = emptyBBox();
-    for (const s of this.strokes) {
+    for (const s of strokes) {
       growBBox(b, s.bbox.minX, s.bbox.minY, 0);
       growBBox(b, s.bbox.maxX, s.bbox.maxY, 0);
     }
@@ -169,13 +295,16 @@ export class Board {
   serialize(camera: Camera): string {
     return JSON.stringify({
       app: 'betterboard',
-      version: 1,
+      version: 2,
       camera,
+      layers: this.layers,
+      activeLayer: this.activeLayer,
       strokes: this.strokes.map((s) => ({
         id: s.id,
         color: s.color,
         size: s.size,
         pen: s.pen,
+        layer: s.layer,
         points: s.points.map((pt) => [
           Math.round(pt.x * 10000) / 10000,
           Math.round(pt.y * 10000) / 10000,
@@ -191,6 +320,22 @@ export class Board {
     if (data?.app !== 'betterboard' || !Array.isArray(data.strokes)) {
       throw new Error('not a betterboard file');
     }
+    // Version 1 files predate layers: everything they hold becomes one layer.
+    const layers: Layer[] = [];
+    for (const raw of Array.isArray(data.layers) ? data.layers : []) {
+      const id = String(raw?.id ?? '');
+      if (!id || layers.some((l) => l.id === id)) continue;
+      layers.push({
+        id,
+        name: String(raw.name ?? 'Layer').slice(0, 40) || 'Layer',
+        opacity: Number.isFinite(raw.opacity) ? Math.min(1, Math.max(0, raw.opacity)) : 1,
+        visible: raw.visible !== false,
+      });
+    }
+    if (layers.length === 0) layers.push(newLayer('Layer 1'));
+    const known = new Set(layers.map((l) => l.id));
+    const fallback = layers[0].id;
+
     const strokes: Stroke[] = [];
     for (const raw of data.strokes) {
       const points = (raw.points as [number, number, number][]).map(([x, y, p]) => ({ x, y, p }));
@@ -198,11 +343,13 @@ export class Board {
       const size = Number(raw.size) || 6;
       const bbox = emptyBBox();
       for (const pt of points) growBBox(bbox, pt.x, pt.y, size / 2 + 1);
+      const layer = String(raw.layer ?? '');
       const stroke: Stroke = {
         id: String(raw.id ?? Math.random().toString(36).slice(2)),
         color: String(raw.color ?? '#e8eaed'),
         size,
         pen: Boolean(raw.pen),
+        layer: known.has(layer) ? layer : fallback,
         points,
         bbox,
       };
@@ -210,6 +357,8 @@ export class Board {
       strokes.push(stroke);
     }
     this.strokes = strokes;
+    this.layers = layers;
+    this.activeLayer = known.has(String(data.activeLayer)) ? String(data.activeLayer) : layers[layers.length - 1].id;
     this.undoStack.length = 0;
     this.redoStack.length = 0;
     this.changed();

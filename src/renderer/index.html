@@ -60,11 +60,33 @@
         <button id="theme-btn" class="tool" title="Light/dark board (⇧⌘L)">
           <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
         </button>
+        <button id="layers-btn" class="tool" title="Layers (L or ⌘L)">
+          <svg viewBox="0 0 24 24"><path d="M12 3.5l8.5 4.3-8.5 4.3-8.5-4.3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4.4 12.2L12 16l7.6-3.8M4.4 16.2L12 20l7.6-3.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
       </div>
     </div>
   </header>
 
   <canvas id="board"></canvas>
+
+  <aside id="layers" class="layers hidden">
+    <header class="layers-head">
+      <span class="layers-title">Layers</span>
+      <button id="layer-add" class="mini" title="New layer (⌥⌘N)">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div id="layer-list" class="layer-list"></div>
+    <footer class="layers-foot">
+      <div class="layer-opacity">
+        <input type="range" id="layer-opacity" min="0" max="100" step="1" value="100" title="Layer opacity" />
+        <span id="layer-opacity-val">100%</span>
+      </div>
+      <button id="layer-delete" class="mini" title="Delete layer and its strokes">
+        <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5.5A1.5 1.5 0 0 1 11.5 4h1A1.5 1.5 0 0 1 14 5.5V7m-7 0l.8 11.1A1.9 1.9 0 0 0 9.7 20h4.6a1.9 1.9 0 0 0 1.9-1.9L17 7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </footer>
+  </aside>
 
   <div id="rot-wheel" class="rot-wheel hidden" title="Drag to rotate · double-click to reset">
     <div class="rot-ring"></div>
