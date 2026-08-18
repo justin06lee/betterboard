@@ -22,10 +22,39 @@ export interface Stroke {
   size: number; // base diameter in world units
   pen: boolean; // true if drawn with real pressure (stylus), false for mouse
   layer: string; // id of the owning layer
+  frame: string; // id of the owning frame
   points: StrokePoint[];
   bbox: BBox;
   path?: Path2D; // cached outline, world coordinates
 }
+
+// Frames are the animation's columns and layers its rows: every frame draws on
+// the same layer stack, and a stroke sits in exactly one cell of that grid.
+export interface Frame {
+  id: string;
+}
+
+export function newFrame(): Frame {
+  return { id: uid() };
+}
+
+export interface Onion {
+  enabled: boolean;
+  before: number; // frames of history to ghost in
+  after: number;
+  opacity: number; // 0..1, for the nearest ghost; further ones fall off
+  tint: boolean; // colour ghosts warm behind / cool ahead instead of their own ink
+}
+
+export const ONION_BEFORE = '#ff5d5d';
+export const ONION_AFTER = '#3fd0c9';
+
+export function defaultOnion(): Onion {
+  return { enabled: false, before: 1, after: 1, opacity: 0.35, tint: true };
+}
+
+export const MIN_FPS = 1;
+export const MAX_FPS = 60;
 
 // Layers are held bottom-first: layers[0] paints under everything. The panel
 // lists them the other way up, the way every other drawing app does.

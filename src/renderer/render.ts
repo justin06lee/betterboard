@@ -14,6 +14,14 @@ export interface Marquee {
   dashOffset: number;
 }
 
+// One ghosted frame: its strokes, how strongly to paint them, and the colour
+// to flatten them to (null keeps their own ink).
+export interface Ghost {
+  strokes: Stroke[];
+  alpha: number;
+  tint: string | null;
+}
+
 export interface RenderOpts {
   theme: Theme;
   grid: boolean;
@@ -22,6 +30,7 @@ export interface RenderOpts {
   marquee: Marquee | null;
   layers: Layer[];
   activeLayer: string;
+  ghosts: Ghost[];
 }
 
 const GRID_BASE = 40; // world units between dots at scale 1
@@ -189,6 +198,24 @@ export function render(
   ];
   ctx.setTransform(...world);
   if (opts.grid) drawGrid(ctx, camera, view, opts.theme.grid);
+
+  // Onion skins sit under the live frame. Each ghost frame is flattened through
+  // the scratch canvas and composited once, so a ghost reads as one translucent
+  // drawing rather than a pile of overlapping translucent strokes.
+  for (const ghost of opts.ghosts) {
+    if (ghost.strokes.length === 0) continue;
+    const gctx = scratchContext(canvas.width, canvas.height, world);
+    for (const s of ghost.strokes) {
+      if (!s.path || !bboxIntersects(s.bbox, view)) continue;
+      gctx.fillStyle = ghost.tint ?? s.color;
+      gctx.fill(s.path);
+    }
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = ghost.alpha;
+    ctx.drawImage(scratch!, 0, 0);
+    ctx.restore();
+  }
 
   const m = opts.marquee;
   const moving = m && m.ids && (m.dx !== 0 || m.dy !== 0) ? m.ids : null;

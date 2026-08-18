@@ -1,9 +1,12 @@
 import { buildPath, strokeHit } from './ink';
+import type { Ghost } from './render';
 import { render, renderExport } from './render';
 import { Board } from './store';
 import type { Camera, Point, Stroke } from './types';
 import {
   MIN_SCALE,
+  ONION_AFTER,
+  ONION_BEFORE,
   THEMES,
   anchorCamera,
   bboxIntersects,
@@ -38,6 +41,9 @@ let size = 6;
 let themeName: ThemeName = 'dark';
 let grid = true;
 let layersOpen = true;
+let timelineOpen = false;
+let playing = false;
+let loop = true;
 
 let live: Stroke | null = null;
 let spaceHeld = false;
@@ -95,6 +101,19 @@ const layerAddBtn = $('layer-add') as HTMLButtonElement;
 const layerDeleteBtn = $('layer-delete') as HTMLButtonElement;
 const layerOpacityInput = $('layer-opacity') as HTMLInputElement;
 const layerOpacityVal = $('layer-opacity-val');
+const timelineBtn = $('timeline-btn');
+const timelineEl = $('timeline');
+const frameStrip = $('frame-strip');
+const frameLabel = $('frame-label');
+const playBtn = $('play');
+const loopBtn = $('loop-btn');
+const fpsInput = $('fps') as HTMLInputElement;
+const onionBtn = $('onion-btn');
+const onionPanel = $('onion-panel');
+const onionBefore = $('onion-before') as HTMLInputElement;
+const onionAfter = $('onion-after') as HTMLInputElement;
+const onionOpacity = $('onion-opacity') as HTMLInputElement;
+const onionTint = $('onion-tint') as HTMLInputElement;
 
 // ---- rendering loop -------------------------------------------------------
 
@@ -104,9 +123,10 @@ function requestRender(): void {
   dirty = true;
   requestAnimationFrame(() => {
     dirty = false;
-    const strokes = erasePending.size
-      ? board.strokes.filter((s) => !erasePending.has(s.id))
-      : board.strokes;
+    const frame = board.activeFrame;
+    const strokes = board.strokes.filter(
+      (s) => s.frame === frame && !erasePending.has(s.id)
+    );
     render(ctx, canvas, camera, strokes, {
       theme: THEMES[themeName],
       grid,
@@ -122,6 +142,7 @@ function requestRender(): void {
           : null,
       layers: board.layers,
       activeLayer: board.activeLayer,
+      ghosts: playing ? [] : ghostCache,
     });
   });
 }
@@ -147,7 +168,7 @@ function scheduleAutosave(): void {
 }
 
 function savePrefs(): void {
-  localStorage.setItem('bb:prefs', JSON.stringify({ tool, color, size, themeName, grid, layersOpen }));
+  localStorage.setItem('bb:prefs', JSON.stringify({ tool, color, size, themeName, grid, layersOpen, timelineOpen, loop }));
 }
 
 function loadPrefs(): void {
@@ -161,6 +182,8 @@ function loadPrefs(): void {
     if (p.themeName === 'light' || p.themeName === 'dark') themeName = p.themeName;
     if (typeof p.grid === 'boolean') grid = p.grid;
     if (typeof p.layersOpen === 'boolean') layersOpen = p.layersOpen;
+    if (typeof p.timelineOpen === 'boolean') timelineOpen = p.timelineOpen;
+    if (typeof p.loop === 'boolean') loop = p.loop;
   } catch {}
 }
 
@@ -434,6 +457,7 @@ function startStroke(e: PointerEvent): void {
     size,
     pen: e.pointerType === 'pen',
     layer: board.activeLayer,
+    frame: board.activeFrame,
     points: [{ x: w.x, y: w.y, p: pressureOf(e) }],
     bbox: emptyBBox(),
   };
@@ -449,18 +473,288 @@ function finishStroke(): void {
   live = null;
 }
 
-// Erasing, like every other edit, is confined to the active layer — that is
-// what layers are for, and it keeps a traced-over sketch safe underneath.
+// Every edit is confined to the active cell of the frame x layer grid — that
+// is what layers are for, and it keeps a traced-over sketch safe underneath.
+function editable(s: Stroke): boolean {
+  return s.frame === board.activeFrame && s.layer === board.activeLayer;
+}
+
 function eraseAt(e: PointerEvent): void {
   const w = toWorld(camera, e.offsetX, e.offsetY);
   const radius = ERASER_RADIUS / camera.scale;
   for (const s of board.strokes) {
-    if (s.layer !== board.activeLayer) continue;
+    if (!editable(s)) continue;
     if (!erasePending.has(s.id) && strokeHit(s, w.x, w.y, radius)) {
       erasePending.add(s.id);
     }
   }
 }
+
+// ---- animation ------------------------------------------------------------
+
+// Ghost frames are rebuilt on board changes rather than per render, so drawing
+// a stroke does not re-filter every neighbouring frame sixty times a second.
+let ghostCache: Ghost[] = [];
+
+function refreshGhosts(): void {
+  const o = board.onion;
+  if (!o.enabled) {
+    ghostCache = [];
+    return;
+  }
+  const out: Ghost[] = [];
+  const here = board.frameIndex;
+  // Farthest first, so the nearest neighbour ends up on top of the pile.
+  const push = (distance: number, direction: -1 | 1) => {
+    const i = here + distance * direction;
+    if (i < 0 || i >= board.frames.length) return;
+    out.push({
+      strokes: board.visibleStrokes(board.frames[i].id),
+      alpha: o.opacity * Math.pow(0.55, distance - 1),
+      tint: o.tint ? (direction < 0 ? ONION_BEFORE : ONION_AFTER) : null,
+    });
+  };
+  for (let d = o.before; d >= 1; d--) push(d, -1);
+  for (let d = o.after; d >= 1; d--) push(d, 1);
+  ghostCache = out;
+}
+
+function renderTimeline(): void {
+  if (frameDrag?.moved) return;
+  const n = board.frames.length;
+  const here = board.frameIndex;
+  frameLabel.textContent = `${here + 1} / ${n}`;
+
+  const filled = new Set(board.strokes.map((s) => s.frame));
+  frameStrip.textContent = '';
+  board.frames.forEach((f, i) => {
+    const cell = document.createElement('button');
+    cell.className =
+      'frame-cell' + (f.id === board.activeFrame ? ' active' : '') + (filled.has(f.id) ? ' filled' : '');
+    cell.dataset.id = f.id;
+    cell.textContent = String(i + 1);
+    cell.title = `Frame ${i + 1}`;
+    cell.addEventListener('pointerdown', (e) => beginFrameDrag(e, f.id));
+    frameStrip.appendChild(cell);
+  });
+
+  ($('frame-del') as HTMLButtonElement).disabled = n <= 1;
+  playBtn.classList.toggle('on', playing);
+  playBtn.innerHTML = playing
+    ? '<svg viewBox="0 0 24 24"><path d="M8 5.5h3.2v13H8zM12.8 5.5H16v13h-3.2z" fill="currentColor"/></svg>'
+    : '<svg viewBox="0 0 24 24"><path d="M8 5.5l11 6.5-11 6.5z" fill="currentColor"/></svg>';
+  loopBtn.classList.toggle('on', loop);
+  onionBtn.classList.toggle('on', board.onion.enabled);
+  if (document.activeElement !== fpsInput) fpsInput.value = String(board.fps);
+}
+
+// Keeping the active cell in view matters most during playback, where the
+// strip would otherwise run away from the frame being shown.
+function scrollFrameIntoView(): void {
+  const cell = frameStrip.querySelector<HTMLElement>('.frame-cell.active');
+  if (!cell) return;
+  const strip = frameStrip.getBoundingClientRect();
+  const r = cell.getBoundingClientRect();
+  if (r.left < strip.left) frameStrip.scrollLeft -= strip.left - r.left + 8;
+  else if (r.right > strip.right) frameStrip.scrollLeft += r.right - strip.right + 8;
+}
+
+let frameDrag: { id: string; startX: number; moved: boolean } | null = null;
+
+function beginFrameDrag(e: PointerEvent, id: string): void {
+  if (e.button !== 0) return;
+  stopPlayback();
+  if (id !== board.activeFrame) clearSelection();
+  board.setActiveFrame(id);
+  frameDrag = { id, startX: e.clientX, moved: false };
+  frameStrip.setPointerCapture(e.pointerId);
+}
+
+frameStrip.addEventListener('pointermove', (e) => {
+  if (!frameDrag) return;
+  const cell = frameStrip.querySelector<HTMLElement>(`.frame-cell[data-id="${frameDrag.id}"]`);
+  if (!cell) return;
+  if (!frameDrag.moved) {
+    if (Math.abs(e.clientX - frameDrag.startX) < 6) return;
+    frameDrag.moved = true;
+    cell.classList.add('dragging');
+  }
+  // Placed by where the pointer is, not by swapping with one neighbour at a
+  // time, so a fast flick across several cells lands in the right slot.
+  const others = [...frameStrip.querySelectorAll<HTMLElement>('.frame-cell')].filter((c) => c !== cell);
+  const target = others.find((c) => {
+    const r = c.getBoundingClientRect();
+    return e.clientX < r.left + r.width / 2;
+  });
+  frameStrip.insertBefore(cell, target ?? null);
+});
+
+function endFrameDrag(): void {
+  if (!frameDrag) return;
+  const { id, moved } = frameDrag;
+  frameDrag = null;
+  if (!moved) return;
+  const cells = [...frameStrip.querySelectorAll<HTMLElement>('.frame-cell')];
+  board.moveFrame(
+    board.frames.findIndex((f) => f.id === id),
+    cells.findIndex((c) => c.dataset.id === id)
+  );
+  renderTimeline();
+}
+
+frameStrip.addEventListener('pointerup', endFrameDrag);
+frameStrip.addEventListener('pointercancel', endFrameDrag);
+
+// ---- playback -------------------------------------------------------------
+
+let playRaf = 0;
+let playAcc = 0;
+let playLast = 0;
+let playReturnTo: string | null = null;
+
+function startPlayback(): void {
+  if (playing || board.frames.length < 2) return;
+  playing = true;
+  playReturnTo = board.activeFrame; // playing is a preview: it should not move you
+  playAcc = 0;
+  playLast = performance.now();
+  playRaf = requestAnimationFrame(playTick);
+  renderTimeline();
+  requestRender();
+}
+
+function stopPlayback(): void {
+  if (!playing) return;
+  playing = false;
+  cancelAnimationFrame(playRaf);
+  if (playReturnTo) board.setActiveFrame(playReturnTo);
+  playReturnTo = null;
+  refreshGhosts();
+  renderTimeline();
+  requestRender();
+}
+
+function togglePlayback(): void {
+  if (playing) stopPlayback();
+  else startPlayback();
+}
+
+// Time-based rather than one frame per tick, so 12fps plays at 12fps on a
+// 120Hz display and a slow frame drops rather than stretches.
+function playTick(now: number): void {
+  if (!playing) return;
+  const step = 1000 / board.fps;
+  playAcc += now - playLast;
+  playLast = now;
+  let advanced = false;
+  while (playAcc >= step) {
+    playAcc -= step;
+    const i = board.frameIndex;
+    if (i + 1 >= board.frames.length && !loop) {
+      playAcc = 0;
+      stopPlayback();
+      return;
+    }
+    board.activeFrame = board.frames[(i + 1) % board.frames.length].id;
+    advanced = true;
+  }
+  if (advanced) {
+    renderTimeline();
+    scrollFrameIntoView();
+    requestRender();
+  }
+  playRaf = requestAnimationFrame(playTick);
+}
+
+function setTimelineOpen(open: boolean): void {
+  timelineOpen = open;
+  document.body.classList.toggle('timeline-open', open);
+  timelineEl.classList.toggle('hidden', !open);
+  timelineBtn.classList.toggle('active', open);
+  if (!open) {
+    stopPlayback();
+    onionPanel.classList.add('hidden');
+  }
+  savePrefs();
+  resizeCanvas();
+  renderTimeline();
+}
+
+function syncOnionPanel(): void {
+  const o = board.onion;
+  onionBefore.value = String(o.before);
+  onionAfter.value = String(o.after);
+  onionOpacity.value = String(Math.round(o.opacity * 100));
+  onionTint.checked = o.tint;
+  $('onion-before-val').textContent = String(o.before);
+  $('onion-after-val').textContent = String(o.after);
+  $('onion-opacity-val').textContent = `${Math.round(o.opacity * 100)}%`;
+}
+
+function gotoFrame(delta: number): void {
+  stopPlayback();
+  clearSelection();
+  board.stepFrame(delta);
+  scrollFrameIntoView();
+}
+
+$('frame-prev').addEventListener('click', () => gotoFrame(-1));
+$('frame-next').addEventListener('click', () => gotoFrame(1));
+playBtn.addEventListener('click', togglePlayback);
+loopBtn.addEventListener('click', () => {
+  loop = !loop;
+  savePrefs();
+  renderTimeline();
+});
+timelineBtn.addEventListener('click', () => setTimelineOpen(!timelineOpen));
+$('frame-add').addEventListener('click', () => {
+  stopPlayback();
+  clearSelection();
+  board.addFrame(false);
+  scrollFrameIntoView();
+});
+$('frame-dup').addEventListener('click', () => {
+  stopPlayback();
+  clearSelection();
+  board.addFrame(true);
+  scrollFrameIntoView();
+});
+$('frame-del').addEventListener('click', () => {
+  stopPlayback();
+  clearSelection();
+  board.removeFrame(board.activeFrame);
+});
+fpsInput.addEventListener('change', () => {
+  board.setFps(Number(fpsInput.value));
+  fpsInput.value = String(board.fps);
+});
+
+onionBtn.addEventListener('click', () => {
+  // First press turns onion skin on and reveals its settings; the next one
+  // hides the settings again, and the button stays lit while it is on.
+  if (!board.onion.enabled) {
+    board.setOnion({ enabled: true });
+    onionPanel.classList.remove('hidden');
+  } else if (onionPanel.classList.contains('hidden')) {
+    onionPanel.classList.remove('hidden');
+  } else {
+    board.setOnion({ enabled: false });
+    onionPanel.classList.add('hidden');
+  }
+});
+
+for (const [el, key] of [
+  [onionBefore, 'before'],
+  [onionAfter, 'after'],
+  [onionOpacity, 'opacity'],
+] as const) {
+  el.addEventListener('input', () => {
+    const raw = Number(el.value);
+    board.setOnion({ [key]: key === 'opacity' ? raw / 100 : raw });
+    syncOnionPanel();
+  });
+}
+onionTint.addEventListener('change', () => board.setOnion({ tint: onionTint.checked }));
 
 // ---- layers panel ---------------------------------------------------------
 
@@ -482,7 +776,9 @@ function renderLayers(): void {
   if (layerDrag?.moved || renamingId) return; // never yank the DOM out from under an interaction
   layerList.textContent = '';
   const counts = new Map<string, number>();
-  for (const s of board.strokes) counts.set(s.layer, (counts.get(s.layer) ?? 0) + 1);
+  for (const s of board.strokes) {
+    if (s.frame === board.activeFrame) counts.set(s.layer, (counts.get(s.layer) ?? 0) + 1);
+  }
 
   for (let i = board.layers.length - 1; i >= 0; i--) {
     const layer = board.layers[i];
@@ -568,18 +864,12 @@ layerList.addEventListener('pointermove', (e) => {
     layerDrag.moved = true;
     row.classList.add('dragging');
   }
-  for (const other of layerList.querySelectorAll<HTMLElement>('.layer-row')) {
-    if (other === row) continue;
-    const r = other.getBoundingClientRect();
-    if (e.clientY < r.top + r.height / 2 && other.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING) {
-      layerList.insertBefore(row, other);
-      break;
-    }
-    if (e.clientY > r.top + r.height / 2 && other.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_PRECEDING) {
-      layerList.insertBefore(row, other.nextSibling);
-      break;
-    }
-  }
+  const others = [...layerList.querySelectorAll<HTMLElement>('.layer-row')].filter((r) => r !== row);
+  const target = others.find((r) => {
+    const b = r.getBoundingClientRect();
+    return e.clientY < b.top + b.height / 2;
+  });
+  layerList.insertBefore(row, target ?? null);
 });
 
 function endLayerDrag(): void {
@@ -683,7 +973,7 @@ function strokesInside(poly: Point[]): Set<string> {
   const ids = new Set<string>();
   const box = polygonBBox(poly);
   for (const s of board.strokes) {
-    if (s.layer !== board.activeLayer || !bboxIntersects(s.bbox, box)) continue;
+    if (!editable(s) || !bboxIntersects(s.bbox, box)) continue;
     let hits = 0;
     for (const pt of s.points) {
       if (pointInPolygon(poly, pt.x, pt.y)) hits++;
@@ -699,7 +989,7 @@ function selectAt(w: Point): void {
   const radius = 8 / camera.scale;
   for (let i = board.strokes.length - 1; i >= 0; i--) {
     const s = board.strokes[i];
-    if (s.layer !== board.activeLayer || !strokeHit(s, w.x, w.y, radius)) continue;
+    if (!editable(s) || !strokeHit(s, w.x, w.y, radius)) continue;
     const pad = 6 / camera.scale;
     const b = s.bbox;
     selection = {
@@ -740,6 +1030,12 @@ function deleteSelection(): void {
 
 canvas.addEventListener('pointerdown', (e) => {
   if (drag) return; // ignore extra pointers mid-gesture
+  if (playing) {
+    // Playback is a preview; the press stops it and returns to the frame you
+    // were editing rather than drawing onto whichever frame happened to show.
+    stopPlayback();
+    return;
+  }
   const panWanted =
     e.pointerType === 'touch' ||
     e.button === 1 ||
@@ -906,7 +1202,19 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === 'Escape') {
+    stopPlayback();
     clearSelection();
+    return;
+  }
+  if (e.key === 'Enter') {
+    if (!timelineOpen) setTimelineOpen(true);
+    togglePlayback();
+    e.preventDefault();
+    return;
+  }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    gotoFrame(e.key === 'ArrowLeft' ? -1 : 1);
+    e.preventDefault();
     return;
   }
   if ((e.key === 'Backspace' || e.key === 'Delete') && selection) {
@@ -930,6 +1238,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'l':
       setLayersOpen(!layersOpen);
+      break;
+    case 't':
+      setTimelineOpen(!timelineOpen);
       break;
     case '[':
       sizeInput.value = String(Math.max(1, size - 1));
@@ -1045,8 +1356,8 @@ window.betterboard.onMenu((action) => {
       break;
     case 'clear':
       void (async () => {
-        if (board.strokes.length === 0) return;
-        if (await window.betterboard.confirm('Clear the board?', 'You can undo this.')) {
+        if (board.frameStrokes().length === 0) return;
+        if (await window.betterboard.confirm('Clear this frame?', 'You can undo this.')) {
           clearSelection();
           board.clear();
         }
@@ -1075,6 +1386,36 @@ window.betterboard.onMenu((action) => {
       break;
     case 'toggle-layers':
       setLayersOpen(!layersOpen);
+      break;
+    case 'toggle-timeline':
+      setTimelineOpen(!timelineOpen);
+      break;
+    case 'frame-new':
+    case 'frame-duplicate':
+      stopPlayback();
+      clearSelection();
+      if (!timelineOpen) setTimelineOpen(true);
+      board.addFrame(action === 'frame-duplicate');
+      scrollFrameIntoView();
+      break;
+    case 'frame-delete':
+      stopPlayback();
+      clearSelection();
+      board.removeFrame(board.activeFrame);
+      break;
+    case 'frame-next':
+      gotoFrame(1);
+      break;
+    case 'frame-prev':
+      gotoFrame(-1);
+      break;
+    case 'play':
+      if (!timelineOpen) setTimelineOpen(true);
+      togglePlayback();
+      break;
+    case 'toggle-onion':
+      if (!timelineOpen) setTimelineOpen(true);
+      board.setOnion({ enabled: !board.onion.enabled });
       break;
     case 'layer-new':
       clearSelection();
@@ -1147,13 +1488,17 @@ async function main(): Promise<void> {
   gridBtn.classList.toggle('active', grid);
 
   board.onChange = () => {
+    refreshGhosts();
     requestRender();
     scheduleAutosave();
     updateUndoButtons();
     renderLayers();
+    renderTimeline();
   };
   updateUndoButtons();
   setLayersOpen(layersOpen);
+  setTimelineOpen(timelineOpen);
+  syncOnionPanel();
 
   window.addEventListener('resize', resizeCanvas);
   resizeCanvas();
@@ -1180,6 +1525,9 @@ async function main(): Promise<void> {
   updateWheel();
   updateZoomLabel();
   renderLayers();
+  renderTimeline();
+  syncOnionPanel();
+  refreshGhosts();
   requestRender();
 }
 

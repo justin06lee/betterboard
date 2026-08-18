@@ -21,9 +21,10 @@ betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designe
 - **Stroke eraser** — removes whole strokes, one undo step per gesture
 - **Lasso select** — loop your pen around anything to select it, then drag the marching-ants outline to move it; `⌫` deletes the selection, `Esc` drops it
 - **Layers** — add, delete, rename, reorder by dragging, hide, and dim. Opacity composites the finished layer rather than each stroke, so overlaps never show seams — drop a sketch to 30% and ink over it cleanly. Drawing, erasing and selecting stay on the active layer, so what's underneath is safe
+- **Animation** — a timeline of frames, each with the full layer stack. Add, duplicate, delete and drag frames into order, set the frame rate, and play the loop back. Onion skinning ghosts the frames either side, tinted red behind and teal ahead, with adjustable reach and strength
 - **Normalize zoom** — one press rebases the current view as the new 100%, restoring the full zoom range without moving a pixel; when you hit the zoom-out floor, the button pulses to offer it
 - **Undo / redo**, dark & light board themes, autosave and session restore
-- **Save / open** boards as JSON, **export** the whole drawing as PNG
+- **Save / open** boards as JSON, **export** the current frame's visible layers as PNG
 
 ## Install
 
@@ -63,6 +64,12 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Normalize zoom | `⇧⌘N` or the ⤢ button in the zoom pill |
 | Rotate | hold `R` and drag the dial — snaps near 45° steps; double-click the dial to reset, `⌘1` also squares the view |
 | Tools | `B`/`P` pen · `E` toggles eraser/pen · `S` toggles lasso/pen · `H` hand |
+| Timeline | `T` or `⌘T` |
+| Play / pause | `Enter` (or `⌘↩`) |
+| Previous / next frame | `←` / `→` |
+| New / duplicate / delete frame | `⌥⌘F` / `⌥⌘D`, or `+` ⧉ 🗑 in the timeline |
+| Reorder frames | Drag a frame cell |
+| Frame rate · onion skin | The fps field · the ◐ button (`⌥⌘O`), then its sliders |
 | Layers panel | `L` or `⌘L` |
 | New / delete layer | `⌥⌘N` / `⌥⌘⌫`, or `+` and 🗑 in the panel |
 | Hide / show a layer | The eye on its row, or `⌥⌘H` for the active one |
@@ -71,15 +78,16 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Undo / redo | `⌘Z` / `⇧⌘Z` |
 | New / open / save / export | `⌘N` / `⌘O` / `⌘S` / `⌘E` |
 | Dot grid · board theme | `⌘G` · `⇧⌘L` |
-| Clear board | `⌘⌫` |
+| Clear frame | `⌘⌫` |
 
 ## File format
 
-Boards are JSON (version 2): a list of layers (`name`, `opacity`, `visible`, bottom-first) and a list of strokes (`color`, `size`, owning `layer`, and `[x, y, pressure]` points in world coordinates) plus the camera. Version 1 files — which predate layers — still open, and everything in them lands on a single layer. Autosaves go to the app's user-data directory; `⌘S` exports a portable `.betterboard.json`.
+Boards are JSON (version 3): lists of frames and of layers (`name`, `opacity`, `visible`, bottom-first), the frame rate and onion-skin settings, and a list of strokes — each carrying its `color`, `size`, owning `layer` and `frame`, and `[x, y, pressure]` points in world coordinates — plus the camera. Frames and layers form a grid and every stroke sits in one cell of it. Older files still open: version 2 predates animation and lands on a single frame, version 1 predates layers as well and lands on a single layer. Autosaves go to the app's user-data directory; `⌘S` exports a portable `.betterboard.json`.
 
 ## Roadmap
 
 - Custom app icon
-- Scale and rotate a selection, copy/paste between boards
+- Scale and rotate a selection, copy/paste between boards and frames
+- Export an animation as GIF or video
 - Shapes and text
 - Pen tilt support
