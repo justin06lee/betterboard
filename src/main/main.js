@@ -89,7 +89,26 @@ function buildMenu() {
         { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => send('undo') },
         { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', click: () => send('redo') },
         { type: 'separator' },
-        { label: 'Clear Board', accelerator: 'CmdOrCtrl+Backspace', click: () => send('clear') },
+        { label: 'Clear Frame', accelerator: 'CmdOrCtrl+Backspace', click: () => send('clear') },
+      ],
+    },
+    {
+      label: 'Animate',
+      submenu: [
+        // Plain Return / arrows are handled in the renderer instead: as menu
+        // accelerators they would be swallowed app-wide and break typing in
+        // the rename and fps fields.
+        { label: 'Play / Pause', accelerator: 'CmdOrCtrl+Return', click: () => send('play') },
+        { type: 'separator' },
+        { label: 'New Frame', accelerator: 'CmdOrCtrl+Alt+F', click: () => send('frame-new') },
+        { label: 'Duplicate Frame', accelerator: 'CmdOrCtrl+Alt+D', click: () => send('frame-duplicate') },
+        { label: 'Delete Frame', click: () => send('frame-delete') },
+        { type: 'separator' },
+        { label: 'Previous Frame', accelerator: 'CmdOrCtrl+Alt+Left', click: () => send('frame-prev') },
+        { label: 'Next Frame', accelerator: 'CmdOrCtrl+Alt+Right', click: () => send('frame-next') },
+        { type: 'separator' },
+        { label: 'Onion Skin', accelerator: 'CmdOrCtrl+Alt+O', click: () => send('toggle-onion') },
+        { label: 'Timeline', accelerator: 'CmdOrCtrl+T', click: () => send('toggle-timeline') },
       ],
     },
     {

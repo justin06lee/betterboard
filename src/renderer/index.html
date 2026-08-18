@@ -60,6 +60,9 @@
         <button id="theme-btn" class="tool" title="Light/dark board (⇧⌘L)">
           <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
         </button>
+        <button id="timeline-btn" class="tool" title="Animation timeline (T)">
+          <svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="1.7"/></svg>
+        </button>
         <button id="layers-btn" class="tool" title="Layers (L or ⌘L)">
           <svg viewBox="0 0 24 24"><path d="M12 3.5l8.5 4.3-8.5 4.3-8.5-4.3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4.4 12.2L12 16l7.6-3.8M4.4 16.2L12 20l7.6-3.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -92,6 +95,67 @@
     <div class="rot-ring"></div>
     <div id="rot-knob"></div>
     <div id="rot-label">0°</div>
+  </div>
+
+  <div id="timeline" class="timeline hidden">
+    <div class="transport">
+      <button id="frame-prev" class="mini" title="Previous frame (←)">
+        <svg viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button id="play" class="mini play" title="Play / pause (Enter)">
+        <svg viewBox="0 0 24 24"><path d="M8 5.5l11 6.5-11 6.5z" fill="currentColor"/></svg>
+      </button>
+      <button id="frame-next" class="mini" title="Next frame (→)">
+        <svg viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button id="loop-btn" class="mini" title="Loop playback">
+        <svg viewBox="0 0 24 24"><path d="M4 9.5A3.5 3.5 0 0 1 7.5 6h9M20 14.5a3.5 3.5 0 0 1-3.5 3.5h-9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M14 3.5L16.8 6 14 8.5M10 15.5L7.2 18 10 20.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <span class="frame-label" id="frame-label">1 / 1</span>
+      <label class="fps-field" title="Frames per second">
+        <input type="number" id="fps" min="1" max="60" step="1" value="12" />
+        <span>fps</span>
+      </label>
+      <button id="onion-btn" class="mini" title="Onion skin">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 3.8a8.2 8.2 0 0 0 0 16.4M12 3.8a8.2 8.2 0 0 1 0 16.4" fill="none" stroke="currentColor" stroke-width="1.4" opacity="0.55" transform="scale(0.62 1) translate(7.3 0)"/></svg>
+      </button>
+    </div>
+
+    <div class="frames" id="frame-strip"></div>
+
+    <div class="frame-actions">
+      <button id="frame-add" class="mini" title="New frame (⌥⌘F)">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <button id="frame-dup" class="mini" title="Duplicate frame (⌥⌘D)">
+        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 20h10a2 2 0 0 0 2-2V8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </button>
+      <button id="frame-del" class="mini" title="Delete frame">
+        <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5.5A1.5 1.5 0 0 1 11.5 4h1A1.5 1.5 0 0 1 14 5.5V7m-7 0l.8 11.1A1.9 1.9 0 0 0 9.7 20h4.6a1.9 1.9 0 0 0 1.9-1.9L17 7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div id="onion-panel" class="onion-panel hidden">
+    <div class="onion-row">
+      <span>Before</span>
+      <input type="range" id="onion-before" min="0" max="3" step="1" value="1" />
+      <span id="onion-before-val">1</span>
+    </div>
+    <div class="onion-row">
+      <span>After</span>
+      <input type="range" id="onion-after" min="0" max="3" step="1" value="1" />
+      <span id="onion-after-val">1</span>
+    </div>
+    <div class="onion-row">
+      <span>Opacity</span>
+      <input type="range" id="onion-opacity" min="5" max="90" step="1" value="35" />
+      <span id="onion-opacity-val">35%</span>
+    </div>
+    <label class="onion-row onion-check">
+      <input type="checkbox" id="onion-tint" checked />
+      <span>Tint past red, future teal</span>
+    </label>
   </div>
 
   <div class="zoom-pill">

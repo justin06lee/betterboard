@@ -1,16 +1,18 @@
 import { buildPath } from './ink';
-import type { BBox, Camera, Layer, Stroke } from './types';
-import { emptyBBox, growBBox, newLayer } from './types';
+import type { BBox, Camera, Frame, Layer, Onion, Stroke } from './types';
+import { MAX_FPS, MIN_FPS, defaultOnion, emptyBBox, growBBox, newFrame, newLayer, uid } from './types';
 
 export type Op =
   | { type: 'add'; stroke: Stroke }
   | { type: 'remove'; removed: { index: number; stroke: Stroke }[] }
-  | { type: 'clear'; strokes: Stroke[] }
   | { type: 'scale'; factor: number }
   | { type: 'move'; ids: string[]; dx: number; dy: number }
   | { type: 'layer-add'; index: number; layer: Layer }
   | { type: 'layer-remove'; index: number; layer: Layer; removed: { index: number; stroke: Stroke }[] }
-  | { type: 'layer-order'; from: number; to: number };
+  | { type: 'layer-order'; from: number; to: number }
+  | { type: 'frame-add'; index: number; frame: Frame; added: Stroke[] }
+  | { type: 'frame-remove'; index: number; frame: Frame; removed: { index: number; stroke: Stroke }[] }
+  | { type: 'frame-order'; from: number; to: number };
 
 const MAX_UNDO = 500;
 
@@ -20,6 +22,10 @@ export class Board {
   strokes: Stroke[] = [];
   layers: Layer[] = [newLayer('Layer 1')];
   activeLayer: string = this.layers[0].id;
+  frames: Frame[] = [newFrame()];
+  activeFrame: string = this.frames[0].id;
+  fps = 12;
+  onion: Onion = defaultOnion();
   private undoStack: Op[] = [];
   private redoStack: Op[] = [];
   onChange: (() => void) | null = null;
@@ -50,13 +56,13 @@ export class Board {
     return this.layer(this.activeLayer) ?? this.layers[this.layers.length - 1];
   }
 
-  strokesOn(id: string): Stroke[] {
-    return this.strokes.filter((s) => s.layer === id);
+  frameStrokes(frame: string = this.activeFrame): Stroke[] {
+    return this.strokes.filter((s) => s.frame === frame);
   }
 
-  visibleStrokes(): Stroke[] {
+  visibleStrokes(frame: string = this.activeFrame): Stroke[] {
     const hidden = new Set(this.layers.filter((l) => !l.visible).map((l) => l.id));
-    return hidden.size === 0 ? this.strokes : this.strokes.filter((s) => !hidden.has(s.layer));
+    return this.strokes.filter((s) => s.frame === frame && !hidden.has(s.layer));
   }
 
   setActiveLayer(id: string): void {
@@ -110,6 +116,99 @@ export class Board {
     this.layers.splice(to, 0, layer);
   }
 
+  // ---- frames -------------------------------------------------------------
+
+  get frameIndex(): number {
+    const i = this.frames.findIndex((f) => f.id === this.activeFrame);
+    return i < 0 ? 0 : i;
+  }
+
+  setActiveFrame(id: string): void {
+    if (id === this.activeFrame || !this.frames.some((f) => f.id === id)) return;
+    this.activeFrame = id;
+    this.changed();
+  }
+
+  stepFrame(delta: number, wrap = true): void {
+    const n = this.frames.length;
+    let i = this.frameIndex + delta;
+    if (wrap) i = ((i % n) + n) % n;
+    else i = Math.min(n - 1, Math.max(0, i));
+    this.setActiveFrame(this.frames[i].id);
+  }
+
+  // A new frame lands right after the current one, so drawing runs left to
+  // right. Duplicating copies the current frame's strokes onto it.
+  addFrame(duplicate = false): Frame {
+    const frame = newFrame();
+    const index = this.frameIndex + 1;
+    this.frames.splice(index, 0, frame);
+    const added: Stroke[] = [];
+    if (duplicate) {
+      for (const s of this.frameStrokes()) {
+        const copy: Stroke = {
+          ...s,
+          id: uid(),
+          frame: frame.id,
+          points: s.points.map((pt) => ({ ...pt })),
+          bbox: { ...s.bbox },
+        };
+        copy.path = buildPath(copy);
+        added.push(copy);
+      }
+      this.strokes.push(...added);
+    }
+    this.activeFrame = frame.id;
+    this.push({ type: 'frame-add', index, frame, added });
+    return frame;
+  }
+
+  removeFrame(id: string): boolean {
+    if (this.frames.length <= 1) return false;
+    const index = this.frames.findIndex((f) => f.id === id);
+    if (index < 0) return false;
+    const frame = this.frames[index];
+    const removed: { index: number; stroke: Stroke }[] = [];
+    for (let i = 0; i < this.strokes.length; i++) {
+      if (this.strokes[i].frame === id) removed.push({ index: i, stroke: this.strokes[i] });
+    }
+    this.frames.splice(index, 1);
+    this.strokes = this.strokes.filter((s) => s.frame !== id);
+    if (this.activeFrame === id) {
+      this.activeFrame = this.frames[Math.min(index, this.frames.length - 1)].id;
+    }
+    this.push({ type: 'frame-remove', index, frame, removed });
+    return true;
+  }
+
+  moveFrame(from: number, to: number): void {
+    if (from === to || from < 0 || to < 0 || from >= this.frames.length || to >= this.frames.length) {
+      return;
+    }
+    this.applyFrameMove(from, to);
+    this.push({ type: 'frame-order', from, to });
+  }
+
+  private applyFrameMove(from: number, to: number): void {
+    const [frame] = this.frames.splice(from, 1);
+    this.frames.splice(to, 0, frame);
+  }
+
+  setFps(fps: number): void {
+    const v = Math.round(Math.min(MAX_FPS, Math.max(MIN_FPS, fps)));
+    if (!Number.isFinite(v) || v === this.fps) return;
+    this.fps = v;
+    this.changed();
+  }
+
+  setOnion(patch: Partial<Onion>): void {
+    this.onion = { ...this.onion, ...patch };
+    this.onion.before = Math.min(3, Math.max(0, Math.round(this.onion.before)));
+    this.onion.after = Math.min(3, Math.max(0, Math.round(this.onion.after)));
+    this.onion.opacity = Math.min(1, Math.max(0.02, this.onion.opacity));
+    this.changed();
+  }
+
   // Opacity and visibility are view switches rather than edits: they redraw and
   // autosave, but they do not land on the undo stack (nor clear the redo one).
   setLayerOpacity(id: string, opacity: number): void {
@@ -146,11 +245,10 @@ export class Board {
     this.push({ type: 'remove', removed });
   }
 
+  // Clears the current frame only — wiping every frame at once is not something
+  // a single menu item should be able to do to an animation.
   clear(): void {
-    if (this.strokes.length === 0) return;
-    const strokes = this.strokes;
-    this.strokes = [];
-    this.push({ type: 'clear', strokes });
+    this.removeStrokes(new Set(this.frameStrokes().map((s) => s.id)));
   }
 
   // Rescales the whole world around the origin, e.g. to rebase the current
@@ -225,8 +323,6 @@ export class Board {
       for (const { index, stroke } of op.removed) {
         this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
       }
-    } else if (op.type === 'clear') {
-      this.strokes = op.strokes;
     } else if (op.type === 'move') {
       this.applyMove(op.ids, -op.dx, -op.dy);
     } else if (op.type === 'layer-add') {
@@ -242,6 +338,21 @@ export class Board {
       this.activeLayer = op.layer.id;
     } else if (op.type === 'layer-order') {
       this.applyLayerMove(op.to, op.from);
+    } else if (op.type === 'frame-add') {
+      const ids = new Set(op.added.map((s) => s.id));
+      this.frames.splice(op.index, 1);
+      if (ids.size) this.strokes = this.strokes.filter((s) => !ids.has(s.id));
+      if (this.activeFrame === op.frame.id) {
+        this.activeFrame = this.frames[Math.min(op.index, this.frames.length - 1)].id;
+      }
+    } else if (op.type === 'frame-remove') {
+      this.frames.splice(op.index, 0, op.frame);
+      for (const { index, stroke } of op.removed) {
+        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
+      }
+      this.activeFrame = op.frame.id;
+    } else if (op.type === 'frame-order') {
+      this.applyFrameMove(op.to, op.from);
     } else {
       this.applyScale(1 / op.factor);
     }
@@ -258,8 +369,6 @@ export class Board {
     } else if (op.type === 'remove') {
       const ids = new Set(op.removed.map((r) => r.stroke.id));
       this.strokes = this.strokes.filter((s) => !ids.has(s.id));
-    } else if (op.type === 'clear') {
-      this.strokes = [];
     } else if (op.type === 'move') {
       this.applyMove(op.ids, op.dx, op.dy);
     } else if (op.type === 'layer-add') {
@@ -274,6 +383,19 @@ export class Board {
       }
     } else if (op.type === 'layer-order') {
       this.applyLayerMove(op.from, op.to);
+    } else if (op.type === 'frame-add') {
+      this.frames.splice(op.index, 0, op.frame);
+      if (op.added.length) this.strokes.push(...op.added);
+      this.activeFrame = op.frame.id;
+    } else if (op.type === 'frame-remove') {
+      const ids = new Set(op.removed.map((r) => r.stroke.id));
+      this.frames.splice(op.index, 1);
+      this.strokes = this.strokes.filter((s) => !ids.has(s.id));
+      if (this.activeFrame === op.frame.id) {
+        this.activeFrame = this.frames[Math.min(op.index, this.frames.length - 1)].id;
+      }
+    } else if (op.type === 'frame-order') {
+      this.applyFrameMove(op.from, op.to);
     } else {
       this.applyScale(op.factor);
     }
@@ -295,16 +417,21 @@ export class Board {
   serialize(camera: Camera): string {
     return JSON.stringify({
       app: 'betterboard',
-      version: 2,
+      version: 3,
       camera,
       layers: this.layers,
       activeLayer: this.activeLayer,
+      frames: this.frames,
+      activeFrame: this.activeFrame,
+      fps: this.fps,
+      onion: this.onion,
       strokes: this.strokes.map((s) => ({
         id: s.id,
         color: s.color,
         size: s.size,
         pen: s.pen,
         layer: s.layer,
+        frame: s.frame,
         points: s.points.map((pt) => [
           Math.round(pt.x * 10000) / 10000,
           Math.round(pt.y * 10000) / 10000,
@@ -336,6 +463,16 @@ export class Board {
     const known = new Set(layers.map((l) => l.id));
     const fallback = layers[0].id;
 
+    // Versions 1 and 2 predate animation: their whole board is frame one.
+    const frames: Frame[] = [];
+    for (const raw of Array.isArray(data.frames) ? data.frames : []) {
+      const id = String(raw?.id ?? '');
+      if (id && !frames.some((f) => f.id === id)) frames.push({ id });
+    }
+    if (frames.length === 0) frames.push(newFrame());
+    const knownFrames = new Set(frames.map((f) => f.id));
+    const frameFallback = frames[0].id;
+
     const strokes: Stroke[] = [];
     for (const raw of data.strokes) {
       const points = (raw.points as [number, number, number][]).map(([x, y, p]) => ({ x, y, p }));
@@ -344,12 +481,14 @@ export class Board {
       const bbox = emptyBBox();
       for (const pt of points) growBBox(bbox, pt.x, pt.y, size / 2 + 1);
       const layer = String(raw.layer ?? '');
+      const frame = String(raw.frame ?? '');
       const stroke: Stroke = {
         id: String(raw.id ?? Math.random().toString(36).slice(2)),
         color: String(raw.color ?? '#e8eaed'),
         size,
         pen: Boolean(raw.pen),
         layer: known.has(layer) ? layer : fallback,
+        frame: knownFrames.has(frame) ? frame : frameFallback,
         points,
         bbox,
       };
@@ -359,6 +498,12 @@ export class Board {
     this.strokes = strokes;
     this.layers = layers;
     this.activeLayer = known.has(String(data.activeLayer)) ? String(data.activeLayer) : layers[layers.length - 1].id;
+    this.frames = frames;
+    this.activeFrame = knownFrames.has(String(data.activeFrame)) ? String(data.activeFrame) : frames[0].id;
+    this.fps = Number.isFinite(data.fps)
+      ? Math.round(Math.min(MAX_FPS, Math.max(MIN_FPS, data.fps)))
+      : 12;
+    this.onion = { ...defaultOnion(), ...(data.onion && typeof data.onion === 'object' ? data.onion : {}) };
     this.undoStack.length = 0;
     this.redoStack.length = 0;
     this.changed();
