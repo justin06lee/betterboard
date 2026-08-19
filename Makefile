@@ -104,8 +104,11 @@ stop:
 endif
 
 # Shared: copy the app sources into the bundle's resources/app directory.
+# Whole directories rather than named files — listing them by hand meant a new
+# main-process module could be added and silently left out of the bundle.
 bundle-app:
 	mkdir -p "$(APP_RES)/src/main" "$(APP_RES)/dist"
 	cp package.json "$(APP_RES)/"
-	cp src/main/main.js src/main/preload.js "$(APP_RES)/src/main/"
-	cp dist/index.html dist/style.css dist/renderer.js "$(APP_RES)/dist/"
+	cp -R src/main/. "$(APP_RES)/src/main/"
+	cp -R dist/. "$(APP_RES)/dist/"
+	@node scripts/check-bundle.js "$(APP_RES)"
