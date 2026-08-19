@@ -16,11 +16,62 @@ export interface BBox {
   maxY: number;
 }
 
+export type BrushId = 'pen' | 'pixel' | 'marker' | 'paint';
+
+export interface Brush {
+  id: BrushId;
+  label: string;
+  hint: string;
+  alpha: number; // strokes of this brush are filled at this opacity
+  sizeScale: number; // the size slider means different things to different brushes
+}
+
+export const BRUSHES: Record<BrushId, Brush> = {
+  pen: {
+    id: 'pen',
+    label: 'Pen',
+    hint: 'Pen (1) — pressure-tapered ink',
+    alpha: 1,
+    sizeScale: 1,
+  },
+  pixel: {
+    id: 'pixel',
+    label: 'Pixel',
+    hint: 'Pixel (2) — snaps to a shared grid; size sets the pixel',
+    alpha: 1,
+    sizeScale: 1,
+  },
+  marker: {
+    id: 'marker',
+    label: 'Marker',
+    hint: 'Marker (3) — flat chisel tip, translucent, layers where it crosses',
+    alpha: 0.62,
+    sizeScale: 1.7,
+  },
+  paint: {
+    id: 'paint',
+    label: 'Paint',
+    hint: 'Paint (4) — dry bristle brush that streaks',
+    alpha: 0.9,
+    sizeScale: 1.9,
+  },
+};
+
+export const BRUSH_ORDER: BrushId[] = ['pen', 'pixel', 'marker', 'paint'];
+
+export function isBrush(v: unknown): v is BrushId {
+  return typeof v === 'string' && v in BRUSHES;
+}
+
 export interface Stroke {
   id: string;
   color: string;
-  size: number; // base diameter in world units
+  size: number; // base diameter in world units, already scaled for the brush
   pen: boolean; // true if drawn with real pressure (stylus), false for mouse
+  brush: BrushId;
+  // Fixed at creation and carried through copies and moves, so brushes with
+  // any randomness in them (paint's bristles) look the same forever.
+  seed: number;
   layer: string; // id of the owning layer
   frame: string; // id of the owning frame
   points: StrokePoint[];

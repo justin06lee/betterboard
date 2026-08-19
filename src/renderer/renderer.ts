@@ -2,8 +2,10 @@ import { buildPath, strokeHit } from './ink';
 import type { Ghost } from './render';
 import { render, renderExport, renderRegion } from './render';
 import { Board } from './store';
-import type { Camera, Point, Stroke } from './types';
+import type { BrushId, Camera, Point, Stroke } from './types';
 import {
+  BRUSHES,
+  BRUSH_ORDER,
   MIN_SCALE,
   ONION_AFTER,
   ONION_BEFORE,
@@ -16,6 +18,7 @@ import {
   pointInPolygon,
   polygonBBox,
   toWorld,
+  isBrush,
   toWorldDelta,
   uid,
 } from './types';
@@ -37,6 +40,7 @@ const board = new Board();
 const camera: Camera = { x: 0, y: 0, scale: 1, rotation: 0 };
 let tool: Tool = 'pen';
 let color = SWATCHES[0];
+let brush: BrushId = 'pen';
 let size = 6;
 let themeName: ThemeName = 'dark';
 let grid = true;
@@ -79,12 +83,19 @@ let cssHeight = 0;
 const canvas = document.getElementById('board') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d', { desynchronized: true, alpha: false })!;
 const $ = (id: string) => document.getElementById(id)!;
-const toolButtons: Record<Tool, HTMLElement> = {
-  pen: $('tool-pen'),
+// 'pen' is not here: the draw tool is represented by whichever brush button is
+// lit, so it is tracked separately.
+const toolButtons: Record<Exclude<Tool, 'pen'>, HTMLElement> = {
   eraser: $('tool-eraser'),
   select: $('tool-select'),
   ask: $('tool-ask'),
   hand: $('tool-hand'),
+};
+const brushButtons: Record<BrushId, HTMLElement> = {
+  pen: $('tool-pen'),
+  pixel: $('brush-pixel'),
+  marker: $('brush-marker'),
+  paint: $('brush-paint'),
 };
 const swatchesEl = $('swatches');
 const colorInput = $('color-input') as HTMLInputElement;
@@ -171,13 +182,14 @@ function scheduleAutosave(): void {
 }
 
 function savePrefs(): void {
-  localStorage.setItem('bb:prefs', JSON.stringify({ tool, color, size, themeName, grid, layersOpen, timelineOpen, loop }));
+  localStorage.setItem('bb:prefs', JSON.stringify({ tool, brush, color, size, themeName, grid, layersOpen, timelineOpen, loop }));
 }
 
 function loadPrefs(): void {
   try {
     const p = JSON.parse(localStorage.getItem('bb:prefs') ?? '{}');
     if (['pen', 'eraser', 'select', 'ask', 'hand'].includes(p.tool)) tool = p.tool;
+    if (isBrush(p.brush)) brush = p.brush;
     if (typeof p.color === 'string') color = p.color;
     if (Number.isFinite(p.size)) size = Math.min(28, Math.max(1, p.size));
     if (p.themeName === 'light' || p.themeName === 'dark') themeName = p.themeName;
@@ -373,11 +385,26 @@ function setTool(t: Tool): void {
   for (const [name, el] of Object.entries(toolButtons)) {
     el.classList.toggle('active', name === t);
   }
+  syncBrushButtons();
   if (t !== 'eraser') eraserCursor = null;
   if (t !== 'select') clearSelection();
   updateCursor();
   savePrefs();
   requestRender();
+}
+
+function syncBrushButtons(): void {
+  for (const id of BRUSH_ORDER) {
+    brushButtons[id].classList.toggle('active', tool === 'pen' && id === brush);
+  }
+}
+
+function setBrush(id: BrushId): void {
+  brush = id;
+  if (tool !== 'pen') setTool('pen');
+  else syncBrushButtons();
+  setSize(size); // the size dot means different things to different brushes
+  savePrefs();
 }
 
 function setColor(c: string): void {
@@ -391,9 +418,10 @@ function setColor(c: string): void {
 
 function setSize(v: number): void {
   size = v;
-  const d = Math.min(18, Math.max(3, v * 0.75));
+  const d = Math.min(18, Math.max(3, v * BRUSHES[brush].sizeScale * 0.75));
   sizeDot.style.width = `${d}px`;
   sizeDot.style.height = `${d}px`;
+  sizeDot.style.borderRadius = brush === 'pixel' ? '2px' : '50%';
   savePrefs();
 }
 
@@ -455,14 +483,16 @@ function startStroke(e: PointerEvent): void {
   live = {
     id: uid(),
     color,
-    size,
+    size: size * BRUSHES[brush].sizeScale,
     pen: e.pointerType === 'pen',
+    brush,
+    seed: (Math.random() * 0xffffffff) >>> 0,
     layer: board.activeLayer,
     frame: board.activeFrame,
     points: [{ x: w.x, y: w.y, p: pressureOf(e) }],
     bbox: emptyBBox(),
   };
-  growBBox(live.bbox, w.x, w.y, size + 2);
+  growBBox(live.bbox, w.x, w.y, live.size + 2);
   live.path = buildPath(live, true);
   requestRender();
 }
@@ -1476,6 +1506,12 @@ window.addEventListener('keydown', (e) => {
     case 'p':
       setTool('pen');
       break;
+    case '1':
+    case '2':
+    case '3':
+    case '4':
+      setBrush(BRUSH_ORDER[Number(e.key) - 1]);
+      break;
     case 'e':
       setTool(tool === 'eraser' ? 'pen' : 'eraser');
       break;
@@ -1702,8 +1738,10 @@ window.betterboard.onMenu((action) => {
 
 // ---- toolbar wiring ---------------------------------------------------------
 
-toolButtons.pen.addEventListener('click', () => setTool('pen'));
 toolButtons.eraser.addEventListener('click', () => setTool('eraser'));
+for (const id of BRUSH_ORDER) {
+  brushButtons[id].addEventListener('click', () => setBrush(id));
+}
 toolButtons.select.addEventListener('click', () => setTool('select'));
 toolButtons.ask.addEventListener('click', () => setTool('ask'));
 toolButtons.hand.addEventListener('click', () => setTool('hand'));
@@ -1750,6 +1788,7 @@ async function main(): Promise<void> {
   loadPrefs();
   applyTheme();
   setTool(tool);
+  syncBrushButtons();
   setColor(color);
   sizeInput.value = String(size);
   setSize(size);

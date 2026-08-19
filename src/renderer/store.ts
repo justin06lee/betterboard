@@ -1,6 +1,6 @@
-import { buildPath } from './ink';
-import type { BBox, Camera, Frame, Layer, Onion, Stroke } from './types';
-import { MAX_FPS, MIN_FPS, defaultOnion, emptyBBox, growBBox, newFrame, newLayer, uid } from './types';
+import { buildPath, hashSeed } from './ink';
+import type { BBox, BrushId, Camera, Frame, Layer, Onion, Stroke } from './types';
+import { MAX_FPS, MIN_FPS, defaultOnion, emptyBBox, growBBox, isBrush, newFrame, newLayer, uid } from './types';
 
 export type Op =
   | { type: 'add'; stroke: Stroke }
@@ -417,7 +417,7 @@ export class Board {
   serialize(camera: Camera): string {
     return JSON.stringify({
       app: 'betterboard',
-      version: 3,
+      version: 4,
       camera,
       layers: this.layers,
       activeLayer: this.activeLayer,
@@ -430,6 +430,8 @@ export class Board {
         color: s.color,
         size: s.size,
         pen: s.pen,
+        brush: s.brush,
+        seed: s.seed,
         layer: s.layer,
         frame: s.frame,
         points: s.points.map((pt) => [
@@ -487,6 +489,8 @@ export class Board {
         color: String(raw.color ?? '#e8eaed'),
         size,
         pen: Boolean(raw.pen),
+        brush: isBrush(raw.brush) ? (raw.brush as BrushId) : 'pen', // pre-brush files are all pen
+        seed: Number.isFinite(raw.seed) ? raw.seed >>> 0 : hashSeed(String(raw.id ?? '')),
         layer: known.has(layer) ? layer : fallback,
         frame: knownFrames.has(frame) ? frame : frameFallback,
         points,

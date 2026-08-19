@@ -14,9 +14,21 @@
 
     <div class="topbar-center">
       <div class="group">
-        <button id="tool-pen" class="tool" title="Pen (B)">
+        <button id="tool-pen" class="tool brush" title="Pen (1) — pressure-tapered ink">
           <svg viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L15.8 5.2a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8.2 18.8 4 20z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M13.5 7.5l3 3" stroke="currentColor" stroke-width="1.8"/></svg>
         </button>
+        <button id="brush-pixel" class="tool brush" title="Pixel (2) — snaps to a shared grid; size sets the pixel">
+          <svg viewBox="0 0 24 24"><g fill="currentColor"><rect x="4" y="14" width="4" height="4"/><rect x="8" y="10" width="4" height="4"/><rect x="12" y="10" width="4" height="4"/><rect x="16" y="6" width="4" height="4"/></g><path d="M4 18h4v-4h4v-4h4V6h4" fill="none" stroke="currentColor" stroke-width="0"/></svg>
+        </button>
+        <button id="brush-marker" class="tool brush" title="Marker (3) — flat chisel tip, translucent">
+          <svg viewBox="0 0 24 24"><path d="M14.6 3.8l5.6 5.6-8.4 8.4-5.6-5.6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M6.2 12.2L3.4 18l2.8 2.8L12 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4 21h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        </button>
+        <button id="brush-paint" class="tool brush" title="Paint (4) — dry bristle brush that streaks">
+          <svg viewBox="0 0 24 24"><path d="M17.6 3.6a2 2 0 0 1 2.8 2.8l-7.1 7.1-2.8-2.8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9.4 12.4c-1.6.5-2.4 1.7-2.6 3.2-.2 1.6-.9 2.3-2.8 2.6 1 1.4 2.6 2.2 4.3 2 2.2-.3 3.6-2 3.5-4a3 3 0 0 0-2.4-3.8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+        </button>
+
+        <div class="sep"></div>
+
         <button id="tool-eraser" class="tool" title="Eraser (E)">
           <svg viewBox="0 0 24 24"><path d="M8.5 18.5H19M4.6 14.6a2 2 0 0 1 0-2.8l7-7a2 2 0 0 1 2.8 0l4.8 4.8a2 2 0 0 1 0 2.8l-6.1 6.1H9.5l-4.9-3.9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 8.6l7.4 7.4" stroke="currentColor" stroke-width="1.8"/></svg>
         </button>
