@@ -3,7 +3,7 @@ BIN       := betterboard
 BUNDLE_ID := com.justin06lee.betterboard
 UNAME_S   := $(shell uname -s)
 
-.PHONY: all build install update launch stop clean bundle-app deps
+.PHONY: all build install update launch stop clean bundle-app deps icon
 
 all: build install launch
 
@@ -11,6 +11,35 @@ update: all
 
 clean:
 	rm -rf out dist node_modules
+
+# Regenerates the whole mark from its one generator: both silhouettes, every
+# raster size, and the .icns. Not part of the golden path — the committed assets
+# are what a build consumes.
+ICON_SIZES := 1024 512 256 128 64 32 16
+ICON_TMP   := out/iconset
+icon:
+	python3 scripts/make-icon.py assets/icon.svg --rounded
+	python3 scripts/make-icon.py assets/betterboard.svg
+ifeq ($(UNAME_S),Darwin)
+	rm -rf $(ICON_TMP) $(ICON_TMP).iconset
+	bunx electron scripts/render-icon.js assets/icon.svg $(ICON_TMP) $(ICON_SIZES)
+	mkdir -p $(ICON_TMP).iconset
+	cp $(ICON_TMP)/16.png   $(ICON_TMP).iconset/icon_16x16.png
+	cp $(ICON_TMP)/32.png   $(ICON_TMP).iconset/icon_16x16@2x.png
+	cp $(ICON_TMP)/32.png   $(ICON_TMP).iconset/icon_32x32.png
+	cp $(ICON_TMP)/64.png   $(ICON_TMP).iconset/icon_32x32@2x.png
+	cp $(ICON_TMP)/128.png  $(ICON_TMP).iconset/icon_128x128.png
+	cp $(ICON_TMP)/256.png  $(ICON_TMP).iconset/icon_128x128@2x.png
+	cp $(ICON_TMP)/256.png  $(ICON_TMP).iconset/icon_256x256.png
+	cp $(ICON_TMP)/512.png  $(ICON_TMP).iconset/icon_256x256@2x.png
+	cp $(ICON_TMP)/512.png  $(ICON_TMP).iconset/icon_512x512.png
+	cp $(ICON_TMP)/1024.png $(ICON_TMP).iconset/icon_512x512@2x.png
+	iconutil -c icns $(ICON_TMP).iconset -o assets/icon.icns
+	rm -rf $(ICON_TMP) $(ICON_TMP).iconset
+	@echo "assets/icon.svg, assets/betterboard.svg and assets/icon.icns regenerated"
+else
+	@echo "assets/icon.svg and assets/betterboard.svg regenerated (icns needs macOS)"
+endif
 
 # bun can skip electron's postinstall on a fresh platform (trust marking does
 # not always trigger it), so run the downloader ourselves when dist is absent.
@@ -44,6 +73,9 @@ build: deps
 	/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $(BUNDLE_ID)" "$(PLIST)"
 	/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $(APP)" "$(PLIST)" || \
 		/usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $(APP)" "$(PLIST)"
+	cp assets/icon.icns "$(OUT_APP)/Contents/Resources/icon.icns"
+	rm -f "$(OUT_APP)/Contents/Resources/electron.icns"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleIconFile icon" "$(PLIST)"
 	codesign --force --deep --sign - "$(OUT_APP)" 2>/dev/null
 
 install: stop
