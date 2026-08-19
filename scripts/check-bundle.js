@@ -42,8 +42,9 @@ if (!fs.existsSync(entry)) {
   walk(entry);
 }
 
-// The renderer is loaded by path rather than by require, so check it directly.
-for (const asset of ['dist/index.html', 'dist/renderer.js', 'dist/style.css', 'package.json']) {
+// The preload script and the renderer are named by path rather than required,
+// so the walk above never reaches them — they get checked directly.
+for (const asset of ['src/main/preload.js', 'dist/index.html', 'dist/renderer.js', 'dist/style.css', 'package.json']) {
   if (!fs.existsSync(path.join(root, asset))) problems.push(`${asset} is missing from the bundle`);
 }
 
