@@ -20,6 +20,8 @@ interface BetterboardAPI {
   saveBoard(json: string): Promise<boolean>;
   openBoard(): Promise<string | null>;
   openImages(): Promise<string[]>;
+  clipboardImage(): Promise<string | null>;
+  clipboardText(): Promise<string>;
   exportPNG(dataURL: string): Promise<boolean>;
   confirm(message: string, detail?: string): Promise<boolean>;
   onMenu(cb: (action: string) => void): void;

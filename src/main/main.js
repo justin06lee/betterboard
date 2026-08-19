@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, ipcMain, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -94,6 +94,15 @@ function buildMenu() {
       submenu: [
         { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => send('undo') },
         { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', click: () => send('redo') },
+        { type: 'separator' },
+        { type: 'separator' },
+        // Chromium only runs its own paste for editable targets, so pressing
+        // Cmd+V over the canvas fires nothing at all. This routes it to the
+        // renderer, which reads the clipboard through the main process.
+        { label: 'Paste', accelerator: 'CmdOrCtrl+V', click: () => send('paste') },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'selectAll' },
         { type: 'separator' },
         { label: 'Clear Frame', accelerator: 'CmdOrCtrl+Backspace', click: () => send('clear') },
       ],
@@ -250,6 +259,15 @@ function registerIpc() {
 
   // Returns data URLs rather than paths: the renderer embeds pictures in the
   // board, and this way it never needs filesystem access of its own.
+  // The renderer has no clipboard access of its own worth relying on: a page
+  // that is not editable never sees a paste event.
+  ipcMain.handle('clipboard:image', () => {
+    const image = clipboard.readImage();
+    return image.isEmpty() ? null : image.toDataURL();
+  });
+
+  ipcMain.handle('clipboard:text', () => clipboard.readText());
+
   ipcMain.handle('image:open', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
       properties: ['openFile', 'multiSelections'],

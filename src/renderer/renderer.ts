@@ -1354,6 +1354,43 @@ async function insertImageFile(): Promise<void> {
   for (const file of files) await placeImage(file);
 }
 
+const isTextField = (el: Element | null): el is HTMLInputElement | HTMLTextAreaElement =>
+  el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+
+// Guards against one keystroke being served twice, on any platform where the
+// menu does not swallow it and a DOM paste event lands as well.
+let lastPasteAt = 0;
+
+// Cmd+V arrives here from the menu rather than as a paste event: Chromium only
+// runs its paste command for editable targets, so over the canvas nothing fires
+// at all. Since the accelerator is consumed, typing fields have to be served
+// too, which is what the text branch is for.
+async function pasteFromClipboard(): Promise<void> {
+  const now = Date.now();
+  if (now - lastPasteAt < 300) return;
+  // Claimed before the first await: reading the clipboard is asynchronous, so
+  // two deliveries of one keystroke would both clear a guard set afterwards.
+  lastPasteAt = now;
+
+  const focused = document.activeElement;
+  if (isTextField(focused)) {
+    const text = await window.betterboard.clipboardText();
+    if (!text) return;
+    const start = focused.selectionStart ?? focused.value.length;
+    const end = focused.selectionEnd ?? start;
+    focused.value = focused.value.slice(0, start) + text + focused.value.slice(end);
+    focused.selectionStart = focused.selectionEnd = start + text.length;
+    focused.dispatchEvent(new Event('input', { bubbles: true }));
+    return;
+  }
+
+  const src = await window.betterboard.clipboardImage();
+  if (!src) return;
+  await placeImage(src);
+}
+
+// Kept as a second route: a real paste event still fires for drags out of other
+// apps and anywhere the platform delivers one.
 window.addEventListener('paste', (e) => {
   const items = e.clipboardData?.items;
   if (!items) return;
@@ -1362,10 +1399,20 @@ window.addEventListener('paste', (e) => {
     const blob = item.getAsFile();
     if (!blob) continue;
     e.preventDefault();
+    if (Date.now() - lastPasteAt < 300) return;
+    lastPasteAt = Date.now();
     void blobToDataURL(blob).then((src) => placeImage(src));
     return;
   }
 });
+
+// Without this, dropping a file anywhere outside the canvas makes the window
+// navigate to it and the app disappears.
+for (const type of ['dragover', 'drop'] as const) {
+  window.addEventListener(type, (e) => {
+    if ((e as DragEvent).dataTransfer?.types.includes('Files')) e.preventDefault();
+  });
+}
 
 // Dropping onto the canvas places the picture where it landed.
 canvas.addEventListener('dragover', (e) => {
@@ -1892,6 +1939,9 @@ window.betterboard.onMenu((action) => {
       break;
     case 'insert-image':
       void insertImageFile();
+      break;
+    case 'paste':
+      void pasteFromClipboard();
       break;
     case 'undo':
       doUndo();

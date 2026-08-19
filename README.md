@@ -69,7 +69,7 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Tools | `B`/`P` draw · `E` toggles eraser/pen · `S` toggles lasso/pen · `H` hand |
 | Ask Claude about a region | `A`, then drag a box (or `⌥⌘A`) |
 | Send · newline · new thread | `Enter` · `⇧Enter` · `+` in the panel |
-| Paste / insert an image | `⌘V`, drop a file on the board, or `⇧⌘I` |
+| Paste / insert an image | `⌘V` (Edit ▸ Paste), drop a file on the board, or `⇧⌘I` |
 | Move / scale / delete an image | Drag it · drag a corner grip · `⌫` |
 | Timeline | `T` or `⌘T` |
 | Play / pause | `Enter` (or `⌘↩`) |

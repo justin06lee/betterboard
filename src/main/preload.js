@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('betterboard', {
   saveBoard: (json) => ipcRenderer.invoke('board:save', json),
   openBoard: () => ipcRenderer.invoke('board:open'),
   openImages: () => ipcRenderer.invoke('image:open'),
+  clipboardImage: () => ipcRenderer.invoke('clipboard:image'),
+  clipboardText: () => ipcRenderer.invoke('clipboard:text'),
   exportPNG: (dataURL) => ipcRenderer.invoke('board:export-png', dataURL),
   confirm: (message, detail) => ipcRenderer.invoke('ui:confirm', message, detail),
   onMenu: (cb) => ipcRenderer.on('menu', (_e, action) => cb(action)),
