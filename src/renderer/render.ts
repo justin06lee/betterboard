@@ -1,5 +1,5 @@
 import type { BBox, Camera, Layer, Point, Stroke, Theme } from './types';
-import { bboxIntersects, emptyBBox, growBBox, toScreen, toWorld } from './types';
+import { BRUSHES, bboxIntersects, emptyBBox, growBBox, toScreen, toWorld } from './types';
 
 type Matrix = [number, number, number, number, number, number];
 
@@ -78,8 +78,7 @@ function paintLayer(
 ): void {
   for (const s of list) {
     if (!s.path || (moving?.has(s.id) ?? false) || !bboxIntersects(s.bbox, view)) continue;
-    ctx.fillStyle = s.color;
-    ctx.fill(s.path);
+    fillStroke(ctx, s);
   }
   if (moving && m) {
     ctx.save();
@@ -90,15 +89,26 @@ function paintLayer(
       if (!bboxIntersects({ minX: b.minX + m.dx, minY: b.minY + m.dy, maxX: b.maxX + m.dx, maxY: b.maxY + m.dy }, view)) {
         continue;
       }
-      ctx.fillStyle = s.color;
-      ctx.fill(s.path);
+      fillStroke(ctx, s);
     }
     ctx.restore();
   }
-  if (live?.path) {
-    ctx.fillStyle = live.color;
-    ctx.fill(live.path);
+  if (live?.path) fillStroke(ctx, live);
+}
+
+// Brushes carry their own opacity — a marker layers where it crosses itself in
+// a way a pen never should. globalAlpha is always put back so the caller's
+// compositing (layer opacity, onion ghosts) is unaffected.
+function fillStroke(ctx: CanvasRenderingContext2D, s: Stroke): void {
+  const alpha = BRUSHES[s.brush]?.alpha ?? 1;
+  ctx.fillStyle = s.color;
+  if (alpha >= 1) {
+    ctx.fill(s.path!);
+    return;
   }
+  ctx.globalAlpha = alpha;
+  ctx.fill(s.path!);
+  ctx.globalAlpha = 1;
 }
 
 // Drawn under the world transform, so the dots rotate with the canvas.
@@ -212,9 +222,13 @@ export function render(
     const gctx = scratchContext(canvas.width, canvas.height, world);
     for (const s of ghost.strokes) {
       if (!s.path || !bboxIntersects(s.bbox, view)) continue;
+      // A tinted ghost is a flat silhouette; an untinted one should look like
+      // the frame it came from, brush opacity and all.
       gctx.fillStyle = ghost.tint ?? s.color;
+      gctx.globalAlpha = ghost.tint ? 1 : (BRUSHES[s.brush]?.alpha ?? 1);
       gctx.fill(s.path);
     }
+    gctx.globalAlpha = 1;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = ghost.alpha;

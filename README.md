@@ -15,7 +15,7 @@ betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designe
 
 ## Features
 
-- **Pressure-sensitive pen** — stroke width follows stylus pressure via Chromium pointer events; mouse strokes fall back to velocity-simulated pressure
+- **Four brushes** — **pen** (pressure-tapered ink), **pixel** (snaps to a shared world grid, so separate strokes and separate sessions line up — real pixel art), **marker** (flat chisel tip, translucent, builds up where strokes cross) and **paint** (a dry bristle brush with a solid body and frayed edges). Stroke width follows stylus pressure via Chromium pointer events; mouse strokes fall back to velocity-simulated pressure
 - **Infinite canvas** — pan, zoom, and rotate freely, with an adaptive dot grid that follows the view
 - **Stylus-native gestures** — the pen's eraser end erases, the barrel button pans, touch pans
 - **Stroke eraser** — removes whole strokes, one undo step per gesture
@@ -64,7 +64,8 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Zoom to fit | `⌘1` |
 | Normalize zoom | `⇧⌘N` or the ⤢ button in the zoom pill |
 | Rotate | hold `R` and drag the dial — snaps near 45° steps; double-click the dial to reset, `⌘1` also squares the view |
-| Tools | `B`/`P` pen · `E` toggles eraser/pen · `S` toggles lasso/pen · `H` hand |
+| Brushes | `1` pen · `2` pixel · `3` marker · `4` paint |
+| Tools | `B`/`P` draw · `E` toggles eraser/pen · `S` toggles lasso/pen · `H` hand |
 | Ask Claude about a region | `A`, then drag a box (or `⌥⌘A`) |
 | Send · newline · new thread | `Enter` · `⇧Enter` · `+` in the panel |
 | Timeline | `T` or `⌘T` |
@@ -96,7 +97,7 @@ It is entirely opt-in and off until you add a key: **File → Claude API Key…*
 
 ## File format
 
-Boards are JSON (version 3): lists of frames and of layers (`name`, `opacity`, `visible`, bottom-first), the frame rate and onion-skin settings, and a list of strokes — each carrying its `color`, `size`, owning `layer` and `frame`, and `[x, y, pressure]` points in world coordinates — plus the camera. Frames and layers form a grid and every stroke sits in one cell of it. Older files still open: version 2 predates animation and lands on a single frame, version 1 predates layers as well and lands on a single layer. Autosaves go to the app's user-data directory; `⌘S` exports a portable `.betterboard.json`.
+Boards are JSON (version 4): lists of frames and of layers (`name`, `opacity`, `visible`, bottom-first), the frame rate and onion-skin settings, and a list of strokes — each carrying its `color`, `size`, `brush`, a `seed` (so brushes with any randomness redraw identically), its owning `layer` and `frame`, and `[x, y, pressure]` points in world coordinates — plus the camera. Frames and layers form a grid and every stroke sits in one cell of it. Older files still open, each filling in what it predates: version 3 has no brushes and loads as pen, version 2 has no animation and lands on a single frame, version 1 has no layers either. Autosaves go to the app's user-data directory; `⌘S` exports a portable `.betterboard.json`.
 
 ## Roadmap
 
