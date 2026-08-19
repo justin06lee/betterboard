@@ -19,6 +19,7 @@ interface BetterboardAPI {
   loadAutosave(): Promise<string | null>;
   saveBoard(json: string): Promise<boolean>;
   openBoard(): Promise<string | null>;
+  openImages(): Promise<string[]>;
   exportPNG(dataURL: string): Promise<boolean>;
   confirm(message: string, detail?: string): Promise<boolean>;
   onMenu(cb: (action: string) => void): void;

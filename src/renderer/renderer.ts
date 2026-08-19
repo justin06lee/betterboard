@@ -1,8 +1,9 @@
 import { buildPath, strokeHit } from './ink';
 import type { Ghost } from './render';
-import { render, renderExport, renderRegion } from './render';
+import type { Rect } from './store';
+import { HANDLE, render, renderExport, renderRegion } from './render';
 import { Board } from './store';
-import type { BrushId, Camera, Point, Stroke } from './types';
+import type { BoardImage, BrushId, Camera, Point, Stroke } from './types';
 import {
   BRUSHES,
   BRUSH_ORDER,
@@ -18,6 +19,10 @@ import {
   pointInPolygon,
   polygonBBox,
   toWorld,
+  MAX_IMAGE_DIM,
+  imageBBox,
+  toScreen,
+  imageHit,
   isBrush,
   toWorldDelta,
   uid,
@@ -58,10 +63,11 @@ const erasePending = new Set<string>();
 // produced. Both live in world coordinates, so they stay put under pan, zoom
 // and rotation without any bookkeeping.
 let lasso: Point[] | null = null;
-let selection: { ids: Set<string>; poly: Point[] } | null = null;
+let selection: { ids: Set<string>; images: Set<string>; poly: Point[] } | null = null;
 let moveX = 0;
 let moveY = 0;
 let hoverInSelection = false;
+let hoverHandle = false;
 let dashOffset = 0;
 let antsTimer: number | undefined;
 
@@ -71,6 +77,7 @@ type Drag =
   | { kind: 'lasso' }
   | { kind: 'move'; startX: number; startY: number }
   | { kind: 'region'; x0: number; y0: number }
+  | { kind: 'resize'; id: string; anchor: Point; from: Rect }
   | { kind: 'pan'; startX: number; startY: number; camX: number; camY: number };
 let drag: Drag | null = null;
 let activePointer: number | null = null;
@@ -151,10 +158,19 @@ function requestRender(): void {
       marquee: lasso
         ? { poly: lasso, ids: null, dx: 0, dy: 0, dashOffset }
         : selection
-          ? { poly: selection.poly, ids: selection.ids, dx: moveX, dy: moveY, dashOffset }
+          ? {
+            poly: selection.poly,
+            ids: selection.ids,
+            imageIds: selection.images,
+            handles: selection.images.size === 1 && selection.ids.size === 0,
+            dx: moveX,
+            dy: moveY,
+            dashOffset,
+          }
           : null,
       layers: board.layers,
       activeLayer: board.activeLayer,
+      images: board.images.filter((im) => im.frame === frame),
       ghosts: playing ? [] : ghostCache,
       region: regionDrag ?? region?.quad ?? null,
     });
@@ -233,7 +249,7 @@ function zoomTo(scale: number): void {
 function zoomFit(): void {
   camera.rotation = 0; // fit re-frames everything axis-aligned
   updateWheel();
-  const b = board.contentBBox(board.visibleStrokes());
+  const b = board.contentBBox(board.visibleStrokes(), board.visibleImages());
   if (!b) {
     camera.scale = 1;
     camera.x = -cssWidth / 2;
@@ -286,7 +302,7 @@ function doUndo(): void {
     updateZoomLabel();
     requestRender();
   } else {
-    afterEdit(op.type === 'move' ? { ids: op.ids, dx: -op.dx, dy: -op.dy } : null);
+    afterEdit(op.type === 'move' ? { ids: op.ids, dx: -op.dx, dy: -op.dy } : null, op.type);
   }
 }
 
@@ -300,19 +316,29 @@ function doRedo(): void {
     updateZoomLabel();
     requestRender();
   } else {
-    afterEdit(op.type === 'move' ? { ids: op.ids, dx: op.dx, dy: op.dy } : null);
+    afterEdit(op.type === 'move' ? { ids: op.ids, dx: op.dx, dy: op.dy } : null, op.type);
   }
 }
 
 // Undoing a move should leave the outline wrapped around the strokes it holds;
 // any other edit can invalidate what is selected, so the selection is dropped.
-function afterEdit(moved: { ids: string[]; dx: number; dy: number } | null): void {
+function afterEdit(moved: { ids: string[]; dx: number; dy: number } | null, kind?: string): void {
   const sel = selection;
   if (!sel) return;
   if (moved && moved.ids.length === sel.ids.size && moved.ids.every((id) => sel.ids.has(id))) {
     sel.poly = sel.poly.map((p) => ({ x: p.x + moved.dx, y: p.y + moved.dy }));
     requestRender();
     return;
+  }
+  // Undoing a resize leaves the picture selected — only its rectangle changed,
+  // so the outline is re-derived rather than thrown away.
+  if (kind === 'image-resize' && sel.images.size === 1 && sel.ids.size === 0) {
+    const image = board.images.find((im) => im.id === [...sel.images][0]);
+    if (image) {
+      sel.poly = rectPoly(imageBBox(image));
+      requestRender();
+      return;
+    }
   }
   clearSelection();
 }
@@ -447,6 +473,8 @@ function updateUndoButtons(): void {
 function updateCursor(): void {
   if (drag?.kind === 'pan') canvas.style.cursor = 'grabbing';
   else if (drag?.kind === 'move') canvas.style.cursor = 'grabbing';
+  else if (drag?.kind === 'resize') canvas.style.cursor = 'nwse-resize';
+  else if (tool === 'select' && hoverHandle) canvas.style.cursor = 'nwse-resize';
   else if (spaceHeld || tool === 'hand') canvas.style.cursor = 'grab';
   else if (tool === 'eraser') canvas.style.cursor = 'none';
   else if (tool === 'select' && hoverInSelection) canvas.style.cursor = 'move';
@@ -482,6 +510,7 @@ function startStroke(e: PointerEvent): void {
   const w = toWorld(camera, e.offsetX, e.offsetY);
   live = {
     id: uid(),
+    seq: board.takeSeq(),
     color,
     size: size * BRUSHES[brush].sizeScale,
     pen: e.pointerType === 'pen',
@@ -541,6 +570,7 @@ function refreshGhosts(): void {
     if (i < 0 || i >= board.frames.length) return;
     out.push({
       strokes: board.visibleStrokes(board.frames[i].id),
+      images: board.visibleImages(board.frames[i].id),
       alpha: o.opacity * Math.pow(0.55, distance - 1),
       tint: o.tint ? (direction < 0 ? ONION_BEFORE : ONION_AFTER) : null,
     });
@@ -1022,6 +1052,7 @@ function captureRegion(x0: number, y0: number, x1: number, y1: number): void {
   if (rect.width < 12 || rect.height < 12) return; // a stray tap, not a box
   const canvasEl = renderRegion(
     board.visibleStrokes(),
+    board.visibleImages(),
     board.layers,
     camera,
     rect,
@@ -1188,6 +1219,172 @@ $('ask-key-save').addEventListener('click', () => {
 });
 askKeyInput.addEventListener('keydown', (e) => e.stopPropagation());
 
+// ---- images ---------------------------------------------------------------
+
+// Anything oversized is scaled on the way in: a board file carries its pictures
+// inline, so a handful of full-resolution screenshots would otherwise dwarf the
+// drawing they annotate. Anything already small enough keeps its original bytes
+// and format, rather than being re-encoded for no reason.
+async function normalizeImage(src: string): Promise<{ src: string; width: number; height: number } | null> {
+  const el = new Image();
+  const loaded = await new Promise<boolean>((resolve) => {
+    el.onload = () => resolve(true);
+    el.onerror = () => resolve(false);
+    el.src = src;
+  });
+  if (!loaded || !el.naturalWidth || !el.naturalHeight) return null;
+
+  const longest = Math.max(el.naturalWidth, el.naturalHeight);
+  if (longest <= MAX_IMAGE_DIM) {
+    return { src, width: el.naturalWidth, height: el.naturalHeight };
+  }
+  const k = MAX_IMAGE_DIM / longest;
+  const canvasEl = document.createElement('canvas');
+  canvasEl.width = Math.round(el.naturalWidth * k);
+  canvasEl.height = Math.round(el.naturalHeight * k);
+  const c = canvasEl.getContext('2d')!;
+  c.imageSmoothingQuality = 'high';
+  c.drawImage(el, 0, 0, canvasEl.width, canvasEl.height);
+  // Photographs stay photographs; anything else keeps a lossless path.
+  const jpeg = src.startsWith('data:image/jpeg') || src.startsWith('data:image/jpg');
+  return {
+    src: canvasEl.toDataURL(jpeg ? 'image/jpeg' : 'image/png', jpeg ? 0.9 : undefined),
+    width: canvasEl.width,
+    height: canvasEl.height,
+  };
+}
+
+// Drops a picture at a world point (or the middle of the view), scaled so it
+// sits comfortably inside the viewport rather than swamping it.
+async function placeImage(src: string, at?: Point): Promise<void> {
+  if (!canEditActive()) return;
+  const sized = await normalizeImage(src);
+  if (!sized) {
+    void window.betterboard.confirm('Could not read that image', 'It may be an unsupported format.');
+    return;
+  }
+  const fit = Math.min(
+    1,
+    (cssWidth * 0.5) / (sized.width * camera.scale),
+    (cssHeight * 0.5) / (sized.height * camera.scale)
+  );
+  const width = sized.width * fit;
+  const height = sized.height * fit;
+  const center = at ?? toWorld(camera, cssWidth / 2, cssHeight / 2);
+
+  const image: BoardImage = {
+    id: uid(),
+    seq: board.takeSeq(),
+    src: sized.src,
+    x: center.x - width / 2,
+    y: center.y - height / 2,
+    width,
+    height,
+    layer: board.activeLayer,
+    frame: board.activeFrame,
+  };
+  board.addImage(image);
+  selectImage(image);
+}
+
+// A freshly placed picture arrives selected, so it can be moved or resized
+// straight away without hunting for it.
+function selectImage(image: BoardImage): void {
+  setTool('select');
+  selection = { ids: new Set(), images: new Set([image.id]), poly: rectPoly(imageBBox(image)) };
+  moveX = 0;
+  moveY = 0;
+  syncAnts();
+  requestRender();
+}
+
+// Which corner grip, if any, is under a screen point. Returns the opposite
+// corner, since that is the one a resize pivots around.
+function handleAt(sx: number, sy: number): { image: BoardImage; anchor: Point } | null {
+  if (!selection || selection.images.size !== 1 || selection.ids.size > 0) return null;
+  const image = board.images.find((im) => im.id === [...selection!.images][0]);
+  if (!image) return null;
+  const corners = rectPoly(imageBBox(image));
+  for (let i = 0; i < corners.length; i++) {
+    const p = toScreen(camera, corners[i].x, corners[i].y);
+    if (Math.abs(p.x - sx) <= HANDLE && Math.abs(p.y - sy) <= HANDLE) {
+      return { image, anchor: corners[(i + 2) % 4] };
+    }
+  }
+  return null;
+}
+
+const MIN_IMAGE = 8; // world units
+
+// Scales about the anchored corner, keeping the picture's proportions.
+function resizeRect(from: Rect, anchor: Point, w: Point): Rect {
+  const dx = w.x - anchor.x;
+  const dy = w.y - anchor.y;
+  const k = Math.max(Math.abs(dx) / from.width, Math.abs(dy) / from.height);
+  const width = Math.max(MIN_IMAGE, from.width * k);
+  const height = Math.max(MIN_IMAGE, from.height * k);
+  return {
+    x: dx < 0 ? anchor.x - width : anchor.x,
+    y: dy < 0 ? anchor.y - height : anchor.y,
+    width,
+    height,
+  };
+}
+
+function rectPoly(b: { minX: number; minY: number; maxX: number; maxY: number }): Point[] {
+  return [
+    { x: b.minX, y: b.minY },
+    { x: b.maxX, y: b.minY },
+    { x: b.maxX, y: b.maxY },
+    { x: b.minX, y: b.maxY },
+  ];
+}
+
+function blobToDataURL(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function insertImageFile(): Promise<void> {
+  const files = await window.betterboard.openImages();
+  for (const file of files) await placeImage(file);
+}
+
+window.addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (!item.type.startsWith('image/')) continue;
+    const blob = item.getAsFile();
+    if (!blob) continue;
+    e.preventDefault();
+    void blobToDataURL(blob).then((src) => placeImage(src));
+    return;
+  }
+});
+
+// Dropping onto the canvas places the picture where it landed.
+canvas.addEventListener('dragover', (e) => {
+  if (e.dataTransfer?.types.includes('Files')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }
+});
+
+canvas.addEventListener('drop', (e) => {
+  const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+  if (files.length === 0) return;
+  e.preventDefault();
+  const at = toWorld(camera, e.offsetX, e.offsetY);
+  void (async () => {
+    for (const file of files) await placeImage(await blobToDataURL(file), at);
+  })();
+});
+
 // ---- lasso selection ------------------------------------------------------
 
 // The ants only crawl while there is something to outline, so an idle board
@@ -1212,6 +1409,7 @@ function clearSelection(): void {
   moveX = 0;
   moveY = 0;
   hoverInSelection = false;
+  hoverHandle = false;
   syncAnts();
   updateCursor();
   requestRender();
@@ -1249,6 +1447,13 @@ function strokesInside(poly: Point[]): Set<string> {
 // tap is a one-stroke selection and a tap on nothing is a deselect.
 function selectAt(w: Point): void {
   const radius = 8 / camera.scale;
+  for (let i = board.images.length - 1; i >= 0; i--) {
+    const im = board.images[i];
+    if (im.frame !== board.activeFrame || im.layer !== board.activeLayer) continue;
+    if (!imageHit(im, w.x, w.y)) continue;
+    selection = { ids: new Set(), images: new Set([im.id]), poly: rectPoly(imageBBox(im)) };
+    return;
+  }
   for (let i = board.strokes.length - 1; i >= 0; i--) {
     const s = board.strokes[i];
     if (!editable(s) || !strokeHit(s, w.x, w.y, radius)) continue;
@@ -1256,6 +1461,7 @@ function selectAt(w: Point): void {
     const b = s.bbox;
     selection = {
       ids: new Set([s.id]),
+      images: new Set(),
       poly: [
         { x: b.minX - pad, y: b.minY - pad },
         { x: b.maxX + pad, y: b.minY - pad },
@@ -1266,6 +1472,15 @@ function selectAt(w: Point): void {
     return;
   }
   selection = null;
+}
+
+function imagesInside(poly: Point[]): Set<string> {
+  const ids = new Set<string>();
+  for (const im of board.images) {
+    if (im.frame !== board.activeFrame || im.layer !== board.activeLayer) continue;
+    if (pointInPolygon(poly, im.x + im.width / 2, im.y + im.height / 2)) ids.add(im.id);
+  }
+  return ids;
 }
 
 function commitLasso(): void {
@@ -1279,12 +1494,14 @@ function commitLasso(): void {
     return;
   }
   const ids = strokesInside(poly);
-  selection = ids.size > 0 ? { ids, poly } : null;
+  const pics = imagesInside(poly);
+  selection = ids.size > 0 || pics.size > 0 ? { ids, images: pics, poly } : null;
 }
 
 function deleteSelection(): void {
   if (!selection) return;
   board.removeStrokes(selection.ids);
+  board.removeImages(selection.images);
   clearSelection();
 }
 
@@ -1322,7 +1539,15 @@ canvas.addEventListener('pointerdown', (e) => {
     requestRender();
   } else if (tool === 'select' && e.button === 0) {
     const w = toWorld(camera, e.offsetX, e.offsetY);
-    if (selection && pointInPolygon(selection.poly, w.x, w.y)) {
+    const grip = handleAt(e.offsetX, e.offsetY);
+    if (grip) {
+      drag = {
+        kind: 'resize',
+        id: grip.image.id,
+        anchor: grip.anchor,
+        from: { x: grip.image.x, y: grip.image.y, width: grip.image.width, height: grip.image.height },
+      };
+    } else if (selection && pointInPolygon(selection.poly, w.x, w.y)) {
       // Press inside the outline picks the selection up instead of redrawing it.
       drag = { kind: 'move', startX: e.clientX, startY: e.clientY };
       moveX = 0;
@@ -1354,10 +1579,26 @@ canvas.addEventListener('pointermove', (e) => {
     } else if (tool === 'select' && selection) {
       const w = toWorld(camera, e.offsetX, e.offsetY);
       const inside = pointInPolygon(selection.poly, w.x, w.y);
-      if (inside !== hoverInSelection) {
+      const onGrip = handleAt(e.offsetX, e.offsetY) !== null;
+      if (inside !== hoverInSelection || onGrip !== hoverHandle) {
         hoverInSelection = inside;
+        hoverHandle = onGrip;
         updateCursor();
       }
+    }
+    return;
+  }
+  if (drag.kind === 'resize') {
+    const resize = drag;
+    const image = board.images.find((im) => im.id === resize.id);
+    if (image) {
+      const r = resizeRect(resize.from, resize.anchor, toWorld(camera, e.offsetX, e.offsetY));
+      image.x = r.x;
+      image.y = r.y;
+      image.width = r.width;
+      image.height = r.height;
+      if (selection) selection.poly = rectPoly(imageBBox(image));
+      requestRender();
     }
     return;
   }
@@ -1416,12 +1657,21 @@ function endGesture(e: PointerEvent): void {
     addLassoPoint(e);
     commitLasso();
     syncAnts();
+  } else if (drag.kind === 'resize') {
+    const resize = drag;
+    const image = board.images.find((im) => im.id === resize.id);
+    if (image) {
+      const to = { x: image.x, y: image.y, width: image.width, height: image.height };
+      Object.assign(image, resize.from); // rewind the preview so the op records both ends
+      board.resizeImage(resize.id, to);
+      if (selection) selection.poly = rectPoly(imageBBox(image));
+    }
   } else if (drag.kind === 'region') {
     regionDrag = null;
     captureRegion(drag.x0, drag.y0, e.offsetX, e.offsetY);
   } else if (drag.kind === 'move' && selection) {
     // Commit once, as a single undo step, and carry the outline along with it.
-    board.moveStrokes(selection.ids, moveX, moveY);
+    board.moveItems(selection.ids, selection.images, moveX, moveY);
     selection.poly = selection.poly.map((p) => ({ x: p.x + moveX, y: p.y + moveY }));
     moveX = 0;
     moveY = 0;
@@ -1619,9 +1869,10 @@ async function openBoard(): Promise<void> {
 
 async function exportPNG(): Promise<void> {
   const visible = board.visibleStrokes();
-  const content = board.contentBBox(visible);
+  const pictures = board.visibleImages();
+  const content = board.contentBBox(visible, pictures);
   if (!content) return;
-  const exportCanvas = renderExport(visible, board.layers, content, THEMES[themeName]);
+  const exportCanvas = renderExport(visible, pictures, board.layers, content, THEMES[themeName]);
   await window.betterboard.exportPNG(exportCanvas.toDataURL('image/png'));
 }
 
@@ -1638,6 +1889,9 @@ window.betterboard.onMenu((action) => {
       break;
     case 'export':
       void exportPNG();
+      break;
+    case 'insert-image':
+      void insertImageFile();
       break;
     case 'undo':
       doUndo();

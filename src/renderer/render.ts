@@ -1,5 +1,5 @@
-import type { BBox, Camera, Layer, Point, Stroke, Theme } from './types';
-import { BRUSHES, bboxIntersects, emptyBBox, growBBox, toScreen, toWorld } from './types';
+import type { BBox, BoardImage, Camera, Layer, Point, Stroke, Theme } from './types';
+import { BRUSHES, bboxIntersects, emptyBBox, growBBox, imageBBox, toScreen, toWorld } from './types';
 
 type Matrix = [number, number, number, number, number, number];
 
@@ -9,6 +9,8 @@ type Matrix = [number, number, number, number, number, number];
 export interface Marquee {
   poly: Point[];
   ids: Set<string> | null;
+  imageIds?: Set<string> | null;
+  handles?: boolean; // corner grips, shown when a single picture is selected
   dx: number;
   dy: number;
   dashOffset: number;
@@ -18,6 +20,7 @@ export interface Marquee {
 // to flatten them to (null keeps their own ink).
 export interface Ghost {
   strokes: Stroke[];
+  images: BoardImage[];
   alpha: number;
   tint: string | null;
 }
@@ -30,6 +33,7 @@ export interface RenderOpts {
   marquee: Marquee | null;
   layers: Layer[];
   activeLayer: string;
+  images: BoardImage[];
   ghosts: Ghost[];
   // The region being asked about, as a world-space quad so it stays pinned to
   // the drawing through pan, zoom and rotation.
@@ -40,10 +44,16 @@ const REGION_COLOR = '#a78bfa';
 
 const GRID_BASE = 40; // world units between dots at scale 1
 
-function bucketByLayer(strokes: Stroke[], layers: Layer[]): Map<string, Stroke[]> {
-  const buckets = new Map<string, Stroke[]>();
-  for (const l of layers) buckets.set(l.id, []);
-  for (const s of strokes) buckets.get(s.layer)?.push(s);
+interface Bucket {
+  strokes: Stroke[];
+  images: BoardImage[];
+}
+
+function bucketByLayer(strokes: Stroke[], images: BoardImage[], layers: Layer[]): Map<string, Bucket> {
+  const buckets = new Map<string, Bucket>();
+  for (const l of layers) buckets.set(l.id, { strokes: [], images: [] });
+  for (const s of strokes) buckets.get(s.layer)?.strokes.push(s);
+  for (const im of images) buckets.get(im.layer)?.images.push(im);
   return buckets;
 }
 
@@ -70,26 +80,45 @@ function scratchContext(width: number, height: number, transform: Matrix): Canva
 // own layer, so a moving stroke never jumps above the layers over it.
 function paintLayer(
   ctx: CanvasRenderingContext2D,
-  list: Stroke[],
+  bucket: Bucket,
   view: BBox,
   m: Marquee | null,
   moving: Set<string> | null,
-  live: Stroke | null
+  live: Stroke | null,
+  movingImages: Set<string> | null = null
 ): void {
-  for (const s of list) {
-    if (!s.path || (moving?.has(s.id) ?? false) || !bboxIntersects(s.bbox, view)) continue;
-    fillStroke(ctx, s);
+  const list = bucket.strokes;
+  const pics = bucket.images;
+  // Both lists are already in ascending seq (creation order), so one linear
+  // merge puts ink and pictures back in the order they were actually made.
+  let si = 0;
+  let ii = 0;
+  while (si < list.length || ii < pics.length) {
+    const takeStroke = ii >= pics.length || (si < list.length && list[si].seq <= pics[ii].seq);
+    if (takeStroke) {
+      const s = list[si++];
+      if (!s.path || (moving?.has(s.id) ?? false) || !bboxIntersects(s.bbox, view)) continue;
+      fillStroke(ctx, s);
+    } else {
+      const im = pics[ii++];
+      if ((movingImages?.has(im.id) ?? false) || !im.el || !bboxIntersects(imageBBox(im), view)) continue;
+      ctx.drawImage(im.el, im.x, im.y, im.width, im.height);
+    }
   }
-  if (moving && m) {
+  if (m && (moving || movingImages)) {
     ctx.save();
     ctx.translate(m.dx, m.dy);
     for (const s of list) {
-      if (!s.path || !moving.has(s.id)) continue;
+      if (!s.path || !moving?.has(s.id)) continue;
       const b = s.bbox;
       if (!bboxIntersects({ minX: b.minX + m.dx, minY: b.minY + m.dy, maxX: b.maxX + m.dx, maxY: b.maxY + m.dy }, view)) {
         continue;
       }
       fillStroke(ctx, s);
+    }
+    for (const im of pics) {
+      if (!movingImages?.has(im.id) || !im.el) continue;
+      ctx.drawImage(im.el, im.x, im.y, im.width, im.height);
     }
     ctx.restore();
   }
@@ -170,7 +199,21 @@ function drawMarquee(
   ctx.strokeStyle = theme.accent;
   ctx.stroke();
   ctx.setLineDash([]);
+
+  if (!m.handles) return;
+  for (const p of m.poly) {
+    const s = toScreen(camera, p.x + m.dx, p.y + m.dy);
+    ctx.beginPath();
+    ctx.rect(s.x - HANDLE / 2, s.y - HANDLE / 2, HANDLE, HANDLE);
+    ctx.fillStyle = theme.accent;
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = theme.bg;
+    ctx.stroke();
+  }
 }
+
+export const HANDLE = 9; // css px
 
 export function render(
   ctx: CanvasRenderingContext2D,
@@ -218,8 +261,12 @@ export function render(
   // the scratch canvas and composited once, so a ghost reads as one translucent
   // drawing rather than a pile of overlapping translucent strokes.
   for (const ghost of opts.ghosts) {
-    if (ghost.strokes.length === 0) continue;
+    if (ghost.strokes.length === 0 && ghost.images.length === 0) continue;
     const gctx = scratchContext(canvas.width, canvas.height, world);
+    for (const im of ghost.images) {
+      if (!im.el || !bboxIntersects(imageBBox(im), view)) continue;
+      gctx.drawImage(im.el, im.x, im.y, im.width, im.height);
+    }
     for (const s of ghost.strokes) {
       if (!s.path || !bboxIntersects(s.bbox, view)) continue;
       // A tinted ghost is a flat silhouette; an untinted one should look like
@@ -238,17 +285,18 @@ export function render(
 
   const m = opts.marquee;
   const moving = m && m.ids && (m.dx !== 0 || m.dy !== 0) ? m.ids : null;
-  const buckets = bucketByLayer(strokes, opts.layers);
+  const movingImages = m && m.imageIds && (m.dx !== 0 || m.dy !== 0) ? m.imageIds : null;
+  const buckets = bucketByLayer(strokes, opts.images, opts.layers);
   for (const layer of opts.layers) {
     if (!layer.visible || layer.opacity === 0) continue;
     const list = buckets.get(layer.id)!;
     const live = layer.id === opts.activeLayer ? opts.live : null;
-    if (list.length === 0 && !live) continue;
+    if (list.strokes.length === 0 && list.images.length === 0 && !live) continue;
     if (layer.opacity >= 1) {
-      paintLayer(ctx, list, view, m, moving, live);
+      paintLayer(ctx, list, view, m, moving, live, movingImages);
       continue;
     }
-    paintLayer(scratchContext(canvas.width, canvas.height, world), list, view, m, moving, live);
+    paintLayer(scratchContext(canvas.width, canvas.height, world), list, view, m, moving, live, movingImages);
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = layer.opacity;
@@ -294,6 +342,7 @@ export function render(
 // interface, not drawing, and would only be noise to whoever reads the crop.
 export function renderRegion(
   strokes: Stroke[],
+  images: BoardImage[],
   layers: Layer[],
   camera: Camera,
   rect: { x: number; y: number; width: number; height: number }, // css px on the board canvas
@@ -333,12 +382,12 @@ export function renderRegion(
     growBBox(view, w.x, w.y, 0);
   }
 
-  const buckets = bucketByLayer(strokes, layers);
+  const buckets = bucketByLayer(strokes, images, layers);
   ctx.setTransform(...world);
   for (const layer of layers) {
     if (!layer.visible || layer.opacity === 0) continue;
     const list = buckets.get(layer.id)!;
-    if (list.length === 0) continue;
+    if (list.strokes.length === 0 && list.images.length === 0) continue;
     if (layer.opacity >= 1) {
       paintLayer(ctx, list, view, null, null, null);
       continue;
@@ -362,6 +411,7 @@ export function renderRegion(
 // Exports are always axis-aligned, regardless of the view rotation.
 export function renderExport(
   strokes: Stroke[],
+  images: BoardImage[],
   layers: Layer[],
   content: BBox,
   theme: Theme
@@ -381,12 +431,12 @@ export function renderExport(
 
   const transform: Matrix = [scale, 0, 0, scale, (PAD - content.minX) * scale, (PAD - content.minY) * scale];
   const everything: BBox = { minX: -Infinity, minY: -Infinity, maxX: Infinity, maxY: Infinity };
-  const buckets = bucketByLayer(strokes, layers);
+  const buckets = bucketByLayer(strokes, images, layers);
   ctx.setTransform(...transform);
   for (const layer of layers) {
     if (!layer.visible || layer.opacity === 0) continue;
     const list = buckets.get(layer.id)!;
-    if (list.length === 0) continue;
+    if (list.strokes.length === 0 && list.images.length === 0) continue;
     if (layer.opacity >= 1) {
       paintLayer(ctx, list, everything, null, null, null);
       continue;

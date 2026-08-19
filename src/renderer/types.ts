@@ -63,8 +63,12 @@ export function isBrush(v: unknown): v is BrushId {
   return typeof v === 'string' && v in BRUSHES;
 }
 
+// Strokes and images share one running sequence number per board, so within a
+// layer they can be painted back in the order they were actually made rather
+// than all the ink always landing on top of all the pictures.
 export interface Stroke {
   id: string;
+  seq: number;
   color: string;
   size: number; // base diameter in world units, already scaled for the brush
   pen: boolean; // true if drawn with real pressure (stylus), false for mouse
@@ -77,6 +81,34 @@ export interface Stroke {
   points: StrokePoint[];
   bbox: BBox;
   path?: Path2D; // cached outline, world coordinates
+}
+
+// A placed picture: pasted, dropped, or inserted from a file. Axis-aligned in
+// world space, so it pans, zooms and turns with everything else.
+export interface BoardImage {
+  id: string;
+  seq: number;
+  src: string; // data URL, embedded so a board file stays one portable thing
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  layer: string;
+  frame: string;
+  el?: HTMLImageElement; // decoded bitmap, rebuilt on load rather than saved
+}
+
+// Anything imported larger than this is scaled down on the way in: a board file
+// carries its pictures inline, and a few full-resolution screenshots would
+// otherwise dwarf the drawing they annotate.
+export const MAX_IMAGE_DIM = 1600;
+
+export function imageBBox(img: BoardImage): BBox {
+  return { minX: img.x, minY: img.y, maxX: img.x + img.width, maxY: img.y + img.height };
+}
+
+export function imageHit(img: BoardImage, x: number, y: number): boolean {
+  return x >= img.x && x <= img.x + img.width && y >= img.y && y <= img.y + img.height;
 }
 
 // Frames are the animation's columns and layers its rows: every frame draws on

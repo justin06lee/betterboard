@@ -22,6 +22,7 @@ betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designe
 - **Lasso select** — loop your pen around anything to select it, then drag the marching-ants outline to move it; `⌫` deletes the selection, `Esc` drops it
 - **Layers** — add, delete, rename, reorder by dragging, hide, and dim. Opacity composites the finished layer rather than each stroke, so overlaps never show seams — drop a sketch to 30% and ink over it cleanly. Drawing, erasing and selecting stay on the active layer, so what's underneath is safe
 - **Animation** — a timeline of frames, each with the full layer stack. Add, duplicate, delete and drag frames into order, set the frame rate, and play the loop back. Onion skinning ghosts the frames either side, tinted red behind and teal ahead, with adjustable reach and strength
+- **Images** — paste from the clipboard, drop files onto the board, or insert from disk. They land on the active layer and frame, interleaved with your ink in the order you made things, so you can draw over a reference or paste a screenshot on top of notes. Drag to move, drag a corner to scale, `⌫` to delete
 - **Ask Claude** — box any part of the board and ask about it. The crop is re-rendered clean (no grid, no onion ghosts, no selection outlines) and sent with your question; the reply streams into a narrow side panel you can keep asking follow-ups in
 - **Normalize zoom** — one press rebases the current view as the new 100%, restoring the full zoom range without moving a pixel; when you hit the zoom-out floor, the button pulses to offer it
 - **Undo / redo**, dark & light board themes, autosave and session restore
@@ -68,6 +69,8 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Tools | `B`/`P` draw · `E` toggles eraser/pen · `S` toggles lasso/pen · `H` hand |
 | Ask Claude about a region | `A`, then drag a box (or `⌥⌘A`) |
 | Send · newline · new thread | `Enter` · `⇧Enter` · `+` in the panel |
+| Paste / insert an image | `⌘V`, drop a file on the board, or `⇧⌘I` |
+| Move / scale / delete an image | Drag it · drag a corner grip · `⌫` |
 | Timeline | `T` or `⌘T` |
 | Play / pause | `Enter` (or `⌘↩`) |
 | Previous / next frame | `←` / `→` |
@@ -97,7 +100,7 @@ It is entirely opt-in and off until you add a key: **File → Claude API Key…*
 
 ## File format
 
-Boards are JSON (version 4): lists of frames and of layers (`name`, `opacity`, `visible`, bottom-first), the frame rate and onion-skin settings, and a list of strokes — each carrying its `color`, `size`, `brush`, a `seed` (so brushes with any randomness redraw identically), its owning `layer` and `frame`, and `[x, y, pressure]` points in world coordinates — plus the camera. Frames and layers form a grid and every stroke sits in one cell of it. Older files still open, each filling in what it predates: version 3 has no brushes and loads as pen, version 2 has no animation and lands on a single frame, version 1 has no layers either. Autosaves go to the app's user-data directory; `⌘S` exports a portable `.betterboard.json`.
+Boards are JSON (version 5): lists of frames and of layers (`name`, `opacity`, `visible`, bottom-first), the frame rate and onion-skin settings, a list of strokes — each carrying its `color`, `size`, `brush`, a `seed` (so brushes with any randomness redraw identically), its owning `layer` and `frame`, and `[x, y, pressure]` points in world coordinates — and a list of images, embedded as data URLs so a board stays one portable file. Strokes and images share a running `seq`, which is what puts them back in the order you made them. Imports over 1600px on the long side are scaled down on the way in, since a few full-resolution screenshots would otherwise dwarf the drawing they annotate. Plus the camera. Frames and layers form a grid and every stroke sits in one cell of it. Older files still open, each filling in what it predates: version 4 has no images, version 3 no brushes (its strokes load as pen), version 2 no animation (it lands on a single frame), version 1 no layers either. Autosaves go to the app's user-data directory; `⌘S` exports a portable `.betterboard.json`.
 
 ## Roadmap
 

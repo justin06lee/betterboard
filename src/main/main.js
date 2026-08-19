@@ -81,6 +81,8 @@ function buildMenu() {
         { label: 'Save As…', accelerator: 'CmdOrCtrl+S', click: () => send('save') },
         { label: 'Export PNG…', accelerator: 'CmdOrCtrl+E', click: () => send('export') },
         { type: 'separator' },
+        { label: 'Insert Image…', accelerator: 'CmdOrCtrl+Shift+I', click: () => send('insert-image') },
+        { type: 'separator' },
         { label: 'Ask Claude About a Region', accelerator: 'CmdOrCtrl+Alt+A', click: () => send('ask-region') },
         { label: 'Claude API Key…', click: () => send('ai-key') },
         { type: 'separator' },
@@ -244,6 +246,27 @@ function registerIpc() {
     });
     if (canceled || filePaths.length === 0) return null;
     return fs.readFileSync(filePaths[0], 'utf8');
+  });
+
+  // Returns data URLs rather than paths: the renderer embeds pictures in the
+  // board, and this way it never needs filesystem access of its own.
+  ipcMain.handle('image:open', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] }],
+    });
+    if (canceled) return [];
+    const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp' };
+    const out = [];
+    for (const file of filePaths) {
+      const ext = path.extname(file).slice(1).toLowerCase();
+      const mime = types[ext];
+      if (!mime) continue;
+      try {
+        out.push(`data:${mime};base64,${fs.readFileSync(file).toString('base64')}`);
+      } catch {}
+    }
+    return out;
   });
 
   ipcMain.handle('board:export-png', async (_e, dataURL) => {

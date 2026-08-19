@@ -1,18 +1,28 @@
 import { buildPath, hashSeed } from './ink';
-import type { BBox, BrushId, Camera, Frame, Layer, Onion, Stroke } from './types';
+import type { BBox, BoardImage, BrushId, Camera, Frame, Layer, Onion, Stroke } from './types';
 import { MAX_FPS, MIN_FPS, defaultOnion, emptyBBox, growBBox, isBrush, newFrame, newLayer, uid } from './types';
 
 export type Op =
   | { type: 'add'; stroke: Stroke }
   | { type: 'remove'; removed: { index: number; stroke: Stroke }[] }
   | { type: 'scale'; factor: number }
-  | { type: 'move'; ids: string[]; dx: number; dy: number }
+  | { type: 'move'; ids: string[]; images: string[]; dx: number; dy: number }
+  | { type: 'image-add'; image: BoardImage }
+  | { type: 'image-remove'; removed: { index: number; image: BoardImage }[] }
+  | { type: 'image-resize'; id: string; from: Rect; to: Rect }
   | { type: 'layer-add'; index: number; layer: Layer }
-  | { type: 'layer-remove'; index: number; layer: Layer; removed: { index: number; stroke: Stroke }[] }
+  | { type: 'layer-remove'; index: number; layer: Layer; removed: { index: number; stroke: Stroke }[]; removedImages: BoardImage[] }
   | { type: 'layer-order'; from: number; to: number }
-  | { type: 'frame-add'; index: number; frame: Frame; added: Stroke[] }
-  | { type: 'frame-remove'; index: number; frame: Frame; removed: { index: number; stroke: Stroke }[] }
+  | { type: 'frame-add'; index: number; frame: Frame; added: Stroke[]; addedImages: BoardImage[] }
+  | { type: 'frame-remove'; index: number; frame: Frame; removed: { index: number; stroke: Stroke }[]; removedImages: BoardImage[] }
   | { type: 'frame-order'; from: number; to: number };
+
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 const MAX_UNDO = 500;
 
@@ -20,6 +30,12 @@ export class Board {
   // Flat, in draw order within a layer; cross-layer order comes from `layers`,
   // so a stroke never has to move in this array when layers are reordered.
   strokes: Stroke[] = [];
+  images: BoardImage[] = [];
+  // Handed out to strokes and images alike; see Stroke.seq.
+  private nextSeq = 0;
+  // Called when a picture finishes decoding and the board should repaint. Kept
+  // apart from onChange so a decode does not look like an edit worth saving.
+  onRedraw: (() => void) | null = null;
   layers: Layer[] = [newLayer('Layer 1')];
   activeLayer: string = this.layers[0].id;
   frames: Frame[] = [newFrame()];
@@ -41,9 +57,74 @@ export class Board {
     this.changed();
   }
 
+  takeSeq(): number {
+    return this.nextSeq++;
+  }
+
   addStroke(stroke: Stroke): void {
     this.strokes.push(stroke);
     this.push({ type: 'add', stroke });
+  }
+
+  // ---- images -------------------------------------------------------------
+
+  addImage(image: BoardImage): void {
+    this.hydrate(image);
+    this.images.push(image);
+    this.push({ type: 'image-add', image });
+  }
+
+  removeImages(ids: Set<string>): void {
+    if (ids.size === 0) return;
+    const removed: { index: number; image: BoardImage }[] = [];
+    for (let i = 0; i < this.images.length; i++) {
+      if (ids.has(this.images[i].id)) removed.push({ index: i, image: this.images[i] });
+    }
+    if (removed.length === 0) return;
+    this.images = this.images.filter((im) => !ids.has(im.id));
+    this.push({ type: 'image-remove', removed });
+  }
+
+  resizeImage(id: string, to: Rect): void {
+    const image = this.images.find((im) => im.id === id);
+    if (!image) return;
+    const from = { x: image.x, y: image.y, width: image.width, height: image.height };
+    if (from.x === to.x && from.y === to.y && from.width === to.width && from.height === to.height) return;
+    this.applyRect(image, to);
+    this.push({ type: 'image-resize', id, from, to });
+  }
+
+  private applyRect(image: BoardImage, r: Rect): void {
+    image.x = r.x;
+    image.y = r.y;
+    image.width = r.width;
+    image.height = r.height;
+  }
+
+  private applyRectById(id: string, r: Rect): void {
+    const image = this.images.find((im) => im.id === id);
+    if (image) this.applyRect(image, r);
+  }
+
+  imagesOn(frame: string = this.activeFrame): BoardImage[] {
+    return this.images.filter((im) => im.frame === frame);
+  }
+
+  visibleImages(frame: string = this.activeFrame): BoardImage[] {
+    const hidden = new Set(this.layers.filter((l) => !l.visible).map((l) => l.id));
+    return this.images.filter((im) => im.frame === frame && !hidden.has(im.layer));
+  }
+
+  // Decoding is asynchronous, so a picture paints as soon as its bitmap lands
+  // rather than holding up everything else.
+  hydrate(image: BoardImage): void {
+    if (image.el) return;
+    const el = new Image();
+    el.onload = () => {
+      image.el = el;
+      this.onRedraw?.();
+    };
+    el.src = image.src;
   }
 
   // ---- layers -------------------------------------------------------------
@@ -96,10 +177,12 @@ export class Board {
     }
     this.layers.splice(index, 1);
     this.strokes = this.strokes.filter((s) => s.layer !== id);
+    const removedImages = this.images.filter((im) => im.layer === id);
+    if (removedImages.length) this.images = this.images.filter((im) => im.layer !== id);
     if (this.activeLayer === id) {
       this.activeLayer = this.layers[Math.min(index, this.layers.length - 1)].id;
     }
-    this.push({ type: 'layer-remove', index, layer, removed });
+    this.push({ type: 'layer-remove', index, layer, removed, removedImages });
     return true;
   }
 
@@ -144,6 +227,7 @@ export class Board {
     const index = this.frameIndex + 1;
     this.frames.splice(index, 0, frame);
     const added: Stroke[] = [];
+    const addedImages: BoardImage[] = [];
     if (duplicate) {
       for (const s of this.frameStrokes()) {
         const copy: Stroke = {
@@ -157,9 +241,14 @@ export class Board {
         added.push(copy);
       }
       this.strokes.push(...added);
+      for (const im of this.imagesOn()) {
+        const copy: BoardImage = { ...im, id: uid(), seq: this.takeSeq(), frame: frame.id, el: im.el };
+        this.images.push(copy);
+        addedImages.push(copy);
+      }
     }
     this.activeFrame = frame.id;
-    this.push({ type: 'frame-add', index, frame, added });
+    this.push({ type: 'frame-add', index, frame, added, addedImages });
     return frame;
   }
 
@@ -174,10 +263,12 @@ export class Board {
     }
     this.frames.splice(index, 1);
     this.strokes = this.strokes.filter((s) => s.frame !== id);
+    const removedImages = this.images.filter((im) => im.frame === id);
+    if (removedImages.length) this.images = this.images.filter((im) => im.frame !== id);
     if (this.activeFrame === id) {
       this.activeFrame = this.frames[Math.min(index, this.frames.length - 1)].id;
     }
-    this.push({ type: 'frame-remove', index, frame, removed });
+    this.push({ type: 'frame-remove', index, frame, removed, removedImages });
     return true;
   }
 
@@ -249,6 +340,7 @@ export class Board {
   // a single menu item should be able to do to an animation.
   clear(): void {
     this.removeStrokes(new Set(this.frameStrokes().map((s) => s.id)));
+    this.removeImages(new Set(this.imagesOn().map((im) => im.id)));
   }
 
   // Rescales the whole world around the origin, e.g. to rebase the current
@@ -263,14 +355,21 @@ export class Board {
 
   // Translates a selection. The cached outline is reused under a translation
   // matrix rather than rebuilt, so dragging stays cheap on large selections.
-  moveStrokes(ids: Set<string>, dx: number, dy: number): void {
-    if (ids.size === 0 || (dx === 0 && dy === 0)) return;
-    const list = [...ids];
-    this.applyMove(list, dx, dy);
-    this.push({ type: 'move', ids: list, dx, dy });
+  moveItems(strokeIds: Set<string>, imageIds: Set<string>, dx: number, dy: number): void {
+    if ((strokeIds.size === 0 && imageIds.size === 0) || (dx === 0 && dy === 0)) return;
+    const ids = [...strokeIds];
+    const images = [...imageIds];
+    this.applyMove(ids, images, dx, dy);
+    this.push({ type: 'move', ids, images, dx, dy });
   }
 
-  private applyMove(ids: string[], dx: number, dy: number): void {
+  private applyMove(ids: string[], imageIds: string[], dx: number, dy: number): void {
+    const pictures = new Set(imageIds);
+    for (const im of this.images) {
+      if (!pictures.has(im.id)) continue;
+      im.x += dx;
+      im.y += dy;
+    }
     const set = new Set(ids);
     for (const s of this.strokes) {
       if (!set.has(s.id)) continue;
@@ -293,6 +392,12 @@ export class Board {
   }
 
   private applyScale(f: number): void {
+    for (const im of this.images) {
+      im.x *= f;
+      im.y *= f;
+      im.width *= f;
+      im.height *= f;
+    }
     for (const s of this.strokes) {
       for (const pt of s.points) {
         pt.x *= f;
@@ -324,7 +429,15 @@ export class Board {
         this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
       }
     } else if (op.type === 'move') {
-      this.applyMove(op.ids, -op.dx, -op.dy);
+      this.applyMove(op.ids, op.images, -op.dx, -op.dy);
+    } else if (op.type === 'image-add') {
+      this.images = this.images.filter((im) => im.id !== op.image.id);
+    } else if (op.type === 'image-remove') {
+      for (const { index, image } of op.removed) {
+        this.images.splice(Math.min(index, this.images.length), 0, image);
+      }
+    } else if (op.type === 'image-resize') {
+      this.applyRectById(op.id, op.from);
     } else if (op.type === 'layer-add') {
       this.layers.splice(op.index, 1);
       if (this.activeLayer === op.layer.id) {
@@ -335,13 +448,16 @@ export class Board {
       for (const { index, stroke } of op.removed) {
         this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
       }
+      this.images.push(...op.removedImages);
       this.activeLayer = op.layer.id;
     } else if (op.type === 'layer-order') {
       this.applyLayerMove(op.to, op.from);
     } else if (op.type === 'frame-add') {
       const ids = new Set(op.added.map((s) => s.id));
+      const pics = new Set(op.addedImages.map((im) => im.id));
       this.frames.splice(op.index, 1);
       if (ids.size) this.strokes = this.strokes.filter((s) => !ids.has(s.id));
+      if (pics.size) this.images = this.images.filter((im) => !pics.has(im.id));
       if (this.activeFrame === op.frame.id) {
         this.activeFrame = this.frames[Math.min(op.index, this.frames.length - 1)].id;
       }
@@ -350,6 +466,7 @@ export class Board {
       for (const { index, stroke } of op.removed) {
         this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
       }
+      this.images.push(...op.removedImages);
       this.activeFrame = op.frame.id;
     } else if (op.type === 'frame-order') {
       this.applyFrameMove(op.to, op.from);
@@ -370,14 +487,23 @@ export class Board {
       const ids = new Set(op.removed.map((r) => r.stroke.id));
       this.strokes = this.strokes.filter((s) => !ids.has(s.id));
     } else if (op.type === 'move') {
-      this.applyMove(op.ids, op.dx, op.dy);
+      this.applyMove(op.ids, op.images, op.dx, op.dy);
+    } else if (op.type === 'image-add') {
+      this.images.push(op.image);
+    } else if (op.type === 'image-remove') {
+      const gone = new Set(op.removed.map((r) => r.image.id));
+      this.images = this.images.filter((im) => !gone.has(im.id));
+    } else if (op.type === 'image-resize') {
+      this.applyRectById(op.id, op.to);
     } else if (op.type === 'layer-add') {
       this.layers.splice(op.index, 0, op.layer);
       this.activeLayer = op.layer.id;
     } else if (op.type === 'layer-remove') {
       const ids = new Set(op.removed.map((r) => r.stroke.id));
+      const pics = new Set(op.removedImages.map((im) => im.id));
       this.layers.splice(op.index, 1);
       this.strokes = this.strokes.filter((s) => !ids.has(s.id));
+      this.images = this.images.filter((im) => !pics.has(im.id));
       if (this.activeLayer === op.layer.id) {
         this.activeLayer = this.layers[Math.min(op.index, this.layers.length - 1)].id;
       }
@@ -386,11 +512,14 @@ export class Board {
     } else if (op.type === 'frame-add') {
       this.frames.splice(op.index, 0, op.frame);
       if (op.added.length) this.strokes.push(...op.added);
+      if (op.addedImages.length) this.images.push(...op.addedImages);
       this.activeFrame = op.frame.id;
     } else if (op.type === 'frame-remove') {
       const ids = new Set(op.removed.map((r) => r.stroke.id));
+      const pics = new Set(op.removedImages.map((im) => im.id));
       this.frames.splice(op.index, 1);
       this.strokes = this.strokes.filter((s) => !ids.has(s.id));
+      this.images = this.images.filter((im) => !pics.has(im.id));
       if (this.activeFrame === op.frame.id) {
         this.activeFrame = this.frames[Math.min(op.index, this.frames.length - 1)].id;
       }
@@ -404,12 +533,16 @@ export class Board {
     return op;
   }
 
-  contentBBox(strokes: Stroke[] = this.strokes): BBox | null {
-    if (strokes.length === 0) return null;
+  contentBBox(strokes: Stroke[] = this.strokes, images: BoardImage[] = []): BBox | null {
+    if (strokes.length === 0 && images.length === 0) return null;
     const b = emptyBBox();
     for (const s of strokes) {
       growBBox(b, s.bbox.minX, s.bbox.minY, 0);
       growBBox(b, s.bbox.maxX, s.bbox.maxY, 0);
+    }
+    for (const im of images) {
+      growBBox(b, im.x, im.y, 0);
+      growBBox(b, im.x + im.width, im.y + im.height, 0);
     }
     return b;
   }
@@ -417,7 +550,7 @@ export class Board {
   serialize(camera: Camera): string {
     return JSON.stringify({
       app: 'betterboard',
-      version: 4,
+      version: 5,
       camera,
       layers: this.layers,
       activeLayer: this.activeLayer,
@@ -425,8 +558,20 @@ export class Board {
       activeFrame: this.activeFrame,
       fps: this.fps,
       onion: this.onion,
+      images: this.images.map((im) => ({
+        id: im.id,
+        seq: im.seq,
+        src: im.src,
+        x: Math.round(im.x * 100) / 100,
+        y: Math.round(im.y * 100) / 100,
+        width: Math.round(im.width * 100) / 100,
+        height: Math.round(im.height * 100) / 100,
+        layer: im.layer,
+        frame: im.frame,
+      })),
       strokes: this.strokes.map((s) => ({
         id: s.id,
+        seq: s.seq,
         color: s.color,
         size: s.size,
         pen: s.pen,
@@ -475,6 +620,7 @@ export class Board {
     const knownFrames = new Set(frames.map((f) => f.id));
     const frameFallback = frames[0].id;
 
+    let seq = 0;
     const strokes: Stroke[] = [];
     for (const raw of data.strokes) {
       const points = (raw.points as [number, number, number][]).map(([x, y, p]) => ({ x, y, p }));
@@ -486,6 +632,9 @@ export class Board {
       const frame = String(raw.frame ?? '');
       const stroke: Stroke = {
         id: String(raw.id ?? Math.random().toString(36).slice(2)),
+        // Files written before pictures existed have no ordering to preserve,
+        // so array order becomes the order.
+        seq: Number.isFinite(raw.seq) ? Number(raw.seq) : seq++,
         color: String(raw.color ?? '#e8eaed'),
         size,
         pen: Boolean(raw.pen),
@@ -499,7 +648,30 @@ export class Board {
       stroke.path = buildPath(stroke);
       strokes.push(stroke);
     }
+    const images: BoardImage[] = [];
+    for (const raw of Array.isArray(data.images) ? data.images : []) {
+      const src = String(raw?.src ?? '');
+      if (!src.startsWith('data:image/')) continue;
+      const layer = String(raw.layer ?? '');
+      const frame = String(raw.frame ?? '');
+      const image: BoardImage = {
+        id: String(raw.id ?? uid()),
+        seq: Number.isFinite(raw.seq) ? Number(raw.seq) : seq++,
+        src,
+        x: Number(raw.x) || 0,
+        y: Number(raw.y) || 0,
+        width: Math.max(1, Number(raw.width) || 1),
+        height: Math.max(1, Number(raw.height) || 1),
+        layer: known.has(layer) ? layer : fallback,
+        frame: knownFrames.has(frame) ? frame : frameFallback,
+      };
+      this.hydrate(image);
+      images.push(image);
+    }
+
     this.strokes = strokes;
+    this.images = images;
+    this.nextSeq = Math.max(seq, ...strokes.map((s) => s.seq + 1), ...images.map((im) => im.seq + 1), 0);
     this.layers = layers;
     this.activeLayer = known.has(String(data.activeLayer)) ? String(data.activeLayer) : layers[layers.length - 1].id;
     this.frames = frames;
