@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Generates the betterboard mark.
+"""Generates the betterboard mark: a single pressure-tapered stroke entering
+from beyond the left edge and lifting inside the frame — an endless surface,
+and real ink on it.
 
-One source, two silhouettes: the app icon gets the rounded tile every platform
-expects, the README banner gets a hard-edged square. The mark itself is a single
-pressure-tapered stroke that enters from beyond the left edge and lifts inside
-the frame — an endless surface, and real ink on it.
+Writes the identical artwork to both destinations, so the README banner and the
+app icon are the same picture and cannot drift apart:
 
-    python3 scripts/make-icon.py assets/icon.svg --rounded
-    python3 scripts/make-icon.py assets/betterboard.svg
+    python3 scripts/make-icon.py
 """
 import argparse
 import math
@@ -82,9 +81,9 @@ def dots(spacing=88, r=6.5):
     return "\n      ".join(out)
 
 
-def svg(rounded: bool) -> str:
-    radius = 232 if rounded else 0
-    corner = f' rx="{radius}" ry="{radius}"' if rounded else ""
+def svg() -> str:
+    radius = 232  # the rounded tile every platform expects of an app icon
+    corner = f' rx="{radius}" ry="{radius}"'
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {S} {S}" width="{S}" height="{S}" role="img" aria-label="betterboard">
   <defs>
     <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
@@ -109,17 +108,18 @@ def svg(rounded: bool) -> str:
     <path d="{stroke_path()}" fill="url(#ink)"/>
   </g>
 
-  <rect x="4" y="4" width="{S - 8}" height="{S - 8}"{f' rx="{radius - 4}" ry="{radius - 4}"' if rounded else ""}
+  <rect x="4" y="4" width="{S - 8}" height="{S - 8}" rx="{radius - 4}" ry="{radius - 4}"
         fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="8"/>
 </svg>
 """
 
 
+DESTINATIONS = ("assets/icon.svg", "assets/betterboard.svg")
+
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("out")
-    ap.add_argument("--rounded", action="store_true", help="app-icon silhouette")
-    args = ap.parse_args()
-    with open(args.out, "w") as fh:
-        fh.write(svg(args.rounded))
-    print(f"wrote {args.out}{' (rounded)' if args.rounded else ' (square)'}")
+    argparse.ArgumentParser(description=__doc__).parse_args()
+    art = svg()
+    for out in DESTINATIONS:
+        with open(out, "w") as fh:
+            fh.write(art)
+    print("wrote " + " and ".join(DESTINATIONS) + " (identical)")

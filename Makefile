@@ -12,14 +12,13 @@ update: all
 clean:
 	rm -rf out dist node_modules
 
-# Regenerates the whole mark from its one generator: both silhouettes, every
-# raster size, and the .icns. Not part of the golden path — the committed assets
-# are what a build consumes.
+# Regenerates the whole mark from its one generator: the SVG the README and the
+# app icon share, every raster size, and the .icns. Not part of the golden path
+# — the committed assets are what a build consumes.
 ICON_SIZES := 1024 512 256 128 64 32 16
 ICON_TMP   := out/iconset
 icon:
-	python3 scripts/make-icon.py assets/icon.svg --rounded
-	python3 scripts/make-icon.py assets/betterboard.svg
+	python3 scripts/make-icon.py
 ifeq ($(UNAME_S),Darwin)
 	rm -rf $(ICON_TMP) $(ICON_TMP).iconset
 	bunx electron scripts/render-icon.js assets/icon.svg $(ICON_TMP) $(ICON_SIZES)
