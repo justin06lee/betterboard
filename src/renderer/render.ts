@@ -31,7 +31,12 @@ export interface RenderOpts {
   layers: Layer[];
   activeLayer: string;
   ghosts: Ghost[];
+  // The region being asked about, as a world-space quad so it stays pinned to
+  // the drawing through pan, zoom and rotation.
+  region: Point[] | null;
 }
+
+const REGION_COLOR = '#a78bfa';
 
 const GRID_BASE = 40; // world units between dots at scale 1
 
@@ -239,6 +244,24 @@ export function render(
 
   // Screen-space overlay.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (opts.region && opts.region.length > 1) {
+    ctx.beginPath();
+    opts.region.forEach((p, i) => {
+      const s = toScreen(camera, p.x, p.y);
+      if (i === 0) ctx.moveTo(s.x, s.y);
+      else ctx.lineTo(s.x, s.y);
+    });
+    ctx.closePath();
+    ctx.fillStyle = REGION_COLOR;
+    ctx.globalAlpha = 0.07;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = REGION_COLOR;
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   if (opts.marquee) drawMarquee(ctx, camera, opts.marquee, opts.theme);
   if (opts.eraser) {
     ctx.beginPath();
@@ -249,6 +272,76 @@ export function render(
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
+}
+
+// Captures one on-screen rectangle as a standalone image, at the camera's
+// current position, scale and rotation — so it matches what the user boxed.
+// The dot grid, onion ghosts and marquee are deliberately left out: they are
+// interface, not drawing, and would only be noise to whoever reads the crop.
+export function renderRegion(
+  strokes: Stroke[],
+  layers: Layer[],
+  camera: Camera,
+  rect: { x: number; y: number; width: number; height: number }, // css px on the board canvas
+  theme: Theme,
+  maxDim = 1092
+): HTMLCanvasElement {
+  const scale = Math.min(2, Math.max(0.25, maxDim / Math.max(rect.width, rect.height)));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(rect.width * scale));
+  canvas.height = Math.max(1, Math.round(rect.height * scale));
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = theme.bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Same world transform the board uses, shifted so the rectangle's top-left
+  // corner becomes the image origin.
+  const k = scale * camera.scale;
+  const cos = Math.cos(camera.rotation);
+  const sin = Math.sin(camera.rotation);
+  const world: Matrix = [
+    k * cos,
+    k * sin,
+    -k * sin,
+    k * cos,
+    -k * (cos * camera.x - sin * camera.y) - rect.x * scale,
+    -k * (sin * camera.x + cos * camera.y) - rect.y * scale,
+  ];
+
+  const view = emptyBBox();
+  for (const [sx, sy] of [
+    [rect.x, rect.y],
+    [rect.x + rect.width, rect.y],
+    [rect.x, rect.y + rect.height],
+    [rect.x + rect.width, rect.y + rect.height],
+  ]) {
+    const w = toWorld(camera, sx, sy);
+    growBBox(view, w.x, w.y, 0);
+  }
+
+  const buckets = bucketByLayer(strokes, layers);
+  ctx.setTransform(...world);
+  for (const layer of layers) {
+    if (!layer.visible || layer.opacity === 0) continue;
+    const list = buckets.get(layer.id)!;
+    if (list.length === 0) continue;
+    if (layer.opacity >= 1) {
+      paintLayer(ctx, list, view, null, null, null);
+      continue;
+    }
+    const tmp = document.createElement('canvas');
+    tmp.width = canvas.width;
+    tmp.height = canvas.height;
+    const tctx = tmp.getContext('2d')!;
+    tctx.setTransform(...world);
+    paintLayer(tctx, list, view, null, null, null);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = layer.opacity;
+    ctx.drawImage(tmp, 0, 0);
+    ctx.restore();
+  }
+  return canvas;
 }
 
 // Renders the visible layers into an offscreen canvas sized to fit the content.

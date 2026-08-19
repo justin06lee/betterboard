@@ -9,4 +9,12 @@ contextBridge.exposeInMainWorld('betterboard', {
   exportPNG: (dataURL) => ipcRenderer.invoke('board:export-png', dataURL),
   confirm: (message, detail) => ipcRenderer.invoke('ui:confirm', message, detail),
   onMenu: (cb) => ipcRenderer.on('menu', (_e, action) => cb(action)),
+
+  aiKeyStatus: () => ipcRenderer.invoke('ai:key-status'),
+  aiSetKey: (key) => ipcRenderer.invoke('ai:set-key', key),
+  aiAsk: (payload) => ipcRenderer.invoke('ai:ask', payload),
+  aiCancel: () => ipcRenderer.invoke('ai:cancel'),
+  onAiDelta: (cb) => ipcRenderer.on('ai:delta', (_e, text) => cb(text)),
+  onAiDone: (cb) => ipcRenderer.on('ai:done', () => cb()),
+  onAiError: (cb) => ipcRenderer.on('ai:error', (_e, message) => cb(message)),
 });
