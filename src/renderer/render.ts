@@ -10,7 +10,10 @@ export interface Marquee {
   poly: Point[];
   ids: Set<string> | null;
   imageIds?: Set<string> | null;
-  handles?: boolean; // corner grips, shown when a single picture is selected
+  // Where the resize grips go. Given explicitly rather than derived from
+  // `poly`, which is the selection outline and may be a freehand lasso with
+  // dozens of vertices — one grip per vertex is not what anyone wants.
+  grips?: Point[] | null;
   dx: number;
   dy: number;
   dashOffset: number;
@@ -200,8 +203,8 @@ function drawMarquee(
   ctx.stroke();
   ctx.setLineDash([]);
 
-  if (!m.handles) return;
-  for (const p of m.poly) {
+  if (!m.grips) return;
+  for (const p of m.grips) {
     const s = toScreen(camera, p.x + m.dx, p.y + m.dy);
     ctx.beginPath();
     ctx.rect(s.x - HANDLE / 2, s.y - HANDLE / 2, HANDLE, HANDLE);

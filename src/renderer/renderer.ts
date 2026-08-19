@@ -162,7 +162,7 @@ function requestRender(): void {
             poly: selection.poly,
             ids: selection.ids,
             imageIds: selection.images,
-            handles: selection.images.size === 1 && selection.ids.size === 0,
+            grips: selectionGrips(),
             dx: moveX,
             dy: moveY,
             dashOffset,
@@ -1298,6 +1298,15 @@ function selectImage(image: BoardImage): void {
   requestRender();
 }
 
+// The four corners of the selected picture, when a single one is selected on
+// its own. Null the rest of the time, including when ink is in the selection.
+function selectionGrips(): Point[] | null {
+  const sel = selection;
+  if (!sel || sel.ids.size > 0 || sel.images.size !== 1) return null;
+  const image = board.images.find((im) => im.id === [...sel.images][0]);
+  return image ? rectPoly(imageBBox(image)) : null;
+}
+
 // Which corner grip, if any, is under a screen point. Returns the opposite
 // corner, since that is the one a resize pivots around.
 function handleAt(sx: number, sy: number): { image: BoardImage; anchor: Point } | null {
@@ -1542,6 +1551,13 @@ function commitLasso(): void {
   }
   const ids = strokesInside(poly);
   const pics = imagesInside(poly);
+  if (ids.size === 0 && pics.size === 1) {
+    // One picture on its own: show its bounds rather than the loop drawn round
+    // it, so the outline matches what the grips will resize.
+    const image = board.images.find((im) => im.id === [...pics][0]);
+    selection = image ? { ids, images: pics, poly: rectPoly(imageBBox(image)) } : null;
+    return;
+  }
   selection = ids.size > 0 || pics.size > 0 ? { ids, images: pics, poly } : null;
 }
 
