@@ -1,6 +1,6 @@
 import { buildPath, strokeHit } from './ink';
 import type { Ghost } from './render';
-import { render, renderExport } from './render';
+import { render, renderExport, renderRegion } from './render';
 import { Board } from './store';
 import type { Camera, Point, Stroke } from './types';
 import {
@@ -20,7 +20,7 @@ import {
   uid,
 } from './types';
 
-type Tool = 'pen' | 'eraser' | 'select' | 'hand';
+type Tool = 'pen' | 'eraser' | 'select' | 'ask' | 'hand';
 type ThemeName = 'dark' | 'light';
 
 const ERASER_RADIUS = 16; // screen px
@@ -66,6 +66,7 @@ type Drag =
   | { kind: 'erase' }
   | { kind: 'lasso' }
   | { kind: 'move'; startX: number; startY: number }
+  | { kind: 'region'; x0: number; y0: number }
   | { kind: 'pan'; startX: number; startY: number; camX: number; camY: number };
 let drag: Drag | null = null;
 let activePointer: number | null = null;
@@ -82,6 +83,7 @@ const toolButtons: Record<Tool, HTMLElement> = {
   pen: $('tool-pen'),
   eraser: $('tool-eraser'),
   select: $('tool-select'),
+  ask: $('tool-ask'),
   hand: $('tool-hand'),
 };
 const swatchesEl = $('swatches');
@@ -143,6 +145,7 @@ function requestRender(): void {
       layers: board.layers,
       activeLayer: board.activeLayer,
       ghosts: playing ? [] : ghostCache,
+      region: regionDrag ?? region?.quad ?? null,
     });
   });
 }
@@ -174,9 +177,7 @@ function savePrefs(): void {
 function loadPrefs(): void {
   try {
     const p = JSON.parse(localStorage.getItem('bb:prefs') ?? '{}');
-    if (p.tool === 'pen' || p.tool === 'eraser' || p.tool === 'select' || p.tool === 'hand') {
-      tool = p.tool;
-    }
+    if (['pen', 'eraser', 'select', 'ask', 'hand'].includes(p.tool)) tool = p.tool;
     if (typeof p.color === 'string') color = p.color;
     if (Number.isFinite(p.size)) size = Math.min(28, Math.max(1, p.size));
     if (p.themeName === 'light' || p.themeName === 'dark') themeName = p.themeName;
@@ -926,6 +927,237 @@ layerOpacityInput.addEventListener('input', () => {
   layerOpacityVal.textContent = `${layerOpacityInput.value}%`;
 });
 
+// ---- ask claude -----------------------------------------------------------
+
+interface AskMessage {
+  role: 'user' | 'assistant';
+  text: string;
+  image?: string; // base64 png, on the message the region was attached to
+  error?: boolean;
+}
+
+const askPanel = $('ask');
+const askThreadEl = $('ask-thread');
+const askInput = $('ask-input') as HTMLTextAreaElement;
+const askSend = $('ask-send') as HTMLButtonElement;
+const askForget = $('ask-forget') as HTMLButtonElement;
+const askModel = $('ask-model') as HTMLSelectElement;
+const askKeyBlock = $('ask-key');
+const askKeyInput = $('ask-key-input') as HTMLInputElement;
+const askKeyNote = $('ask-key-note');
+
+// The boxed region, kept as a world-space quad so it stays pinned to the
+// drawing while you pan and zoom, plus the crop that was captured from it.
+let region: { quad: Point[]; dataURL: string; base64: string } | null = null;
+let regionDrag: Point[] | null = null; // live rubber band, also world space
+let thread: AskMessage[] = [];
+let pendingImage: string | null = null;
+let streamEl: HTMLElement | null = null;
+let streaming = false;
+let keyIsSet = false;
+
+function quadFromScreenRect(x0: number, y0: number, x1: number, y1: number): Point[] {
+  const left = Math.min(x0, x1);
+  const top = Math.min(y0, y1);
+  const right = Math.max(x0, x1);
+  const bottom = Math.max(y0, y1);
+  return [
+    toWorld(camera, left, top),
+    toWorld(camera, right, top),
+    toWorld(camera, right, bottom),
+    toWorld(camera, left, bottom),
+  ];
+}
+
+function setAskOpen(open: boolean): void {
+  askPanel.classList.toggle('hidden', !open);
+  if (open) void refreshKeyStatus();
+}
+
+async function refreshKeyStatus(): Promise<void> {
+  const status = await window.betterboard.aiKeyStatus();
+  keyIsSet = status.set;
+  askKeyBlock.classList.toggle('hidden', status.set);
+  askKeyNote.textContent = status.set ? `Saved key ends in ${status.hint}.` : '';
+  askSend.disabled = streaming ? false : !status.set;
+}
+
+function captureRegion(x0: number, y0: number, x1: number, y1: number): void {
+  const rect = {
+    x: Math.min(x0, x1),
+    y: Math.min(y0, y1),
+    width: Math.abs(x1 - x0),
+    height: Math.abs(y1 - y0),
+  };
+  if (rect.width < 12 || rect.height < 12) return; // a stray tap, not a box
+  const canvasEl = renderRegion(
+    board.visibleStrokes(),
+    board.layers,
+    camera,
+    rect,
+    THEMES[themeName]
+  );
+  const dataURL = canvasEl.toDataURL('image/png');
+  region = {
+    quad: quadFromScreenRect(x0, y0, x1, y1),
+    dataURL,
+    base64: dataURL.slice(dataURL.indexOf(',') + 1),
+  };
+  // A new region is a new subject, so it starts a new thread.
+  thread = [];
+  pendingImage = region.base64;
+  askForget.classList.remove('hidden');
+  setAskOpen(true);
+  renderThread();
+  askInput.focus();
+  requestRender();
+}
+
+function clearRegion(): void {
+  region = null;
+  pendingImage = null;
+  askForget.classList.add('hidden');
+  renderThread(); // the crop is drawn from `region`, so the panel has to redraw too
+  requestRender();
+}
+
+function newThread(): void {
+  if (streaming) void window.betterboard.aiCancel();
+  streaming = false;
+  streamEl = null;
+  thread = [];
+  pendingImage = region?.base64 ?? null;
+  renderThread();
+}
+
+function renderThread(): void {
+  askThreadEl.textContent = '';
+  if (region) {
+    const img = document.createElement('img');
+    img.className = 'ask-crop';
+    img.src = region.dataURL;
+    img.alt = 'The region being asked about';
+    askThreadEl.appendChild(img);
+  }
+  if (thread.length === 0 && !region) {
+    const hint = document.createElement('p');
+    hint.className = 'ask-empty';
+    hint.innerHTML =
+      'Pick the <b>Ask</b> tool and drag a box around part of your board, then ask a question about it.';
+    askThreadEl.appendChild(hint);
+  }
+  for (const m of thread) {
+    const el = document.createElement('div');
+    el.className = `ask-msg ${m.role === 'user' ? 'user' : 'claude'}${m.error ? ' error' : ''}`;
+    el.textContent = m.text;
+    askThreadEl.appendChild(el);
+  }
+  askThreadEl.scrollTop = askThreadEl.scrollHeight;
+}
+
+function setStreamingUi(on: boolean): void {
+  streaming = on;
+  askSend.textContent = on ? 'Stop' : 'Ask';
+  askSend.disabled = on ? false : !keyIsSet;
+}
+
+async function sendAsk(): Promise<void> {
+  if (streaming) {
+    void window.betterboard.aiCancel();
+    return;
+  }
+  const text = askInput.value.trim();
+  if (!text || !keyIsSet) return;
+
+  const message: AskMessage = { role: 'user', text };
+  if (pendingImage) {
+    message.image = pendingImage;
+    pendingImage = null;
+  }
+  thread.push(message);
+  askInput.value = '';
+  renderThread();
+
+  // Built before the placeholder is added, so the empty reply is not sent back.
+  const messages = thread
+    .filter((m) => !m.error)
+    .map((m) => {
+      if (m.role === 'assistant') return { role: 'assistant' as const, content: m.text };
+      if (!m.image) return { role: 'user' as const, content: m.text };
+      return {
+        role: 'user' as const,
+        content: [
+          { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png', data: m.image } },
+          { type: 'text' as const, text: m.text },
+        ],
+      };
+    });
+
+  setStreamingUi(true);
+  streamEl = document.createElement('div');
+  streamEl.className = 'ask-msg claude streaming';
+  askThreadEl.appendChild(streamEl);
+  askThreadEl.scrollTop = askThreadEl.scrollHeight;
+
+  await window.betterboard.aiAsk({ model: askModel.value, messages });
+}
+
+function finishStream(): void {
+  if (streamEl) {
+    const text = streamEl.textContent ?? '';
+    streamEl.classList.remove('streaming');
+    if (text.trim()) thread.push({ role: 'assistant', text });
+    else streamEl.remove();
+  }
+  streamEl = null;
+  setStreamingUi(false);
+}
+
+window.betterboard.onAiDelta((text) => {
+  if (!streamEl) return;
+  streamEl.textContent = (streamEl.textContent ?? '') + text;
+  askThreadEl.scrollTop = askThreadEl.scrollHeight;
+});
+
+window.betterboard.onAiDone(finishStream);
+
+window.betterboard.onAiError((message) => {
+  streamEl?.remove();
+  streamEl = null;
+  setStreamingUi(false);
+  thread.push({ role: 'assistant', text: message, error: true });
+  renderThread();
+  void refreshKeyStatus();
+});
+
+$('ask-compose').addEventListener('submit', (e) => {
+  e.preventDefault();
+  void sendAsk();
+});
+askInput.addEventListener('keydown', (e) => {
+  // Enter sends; Shift+Enter is a newline. Stops here so the canvas shortcuts
+  // (Enter plays the animation) never fire while typing.
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    void sendAsk();
+  }
+  e.stopPropagation();
+});
+askForget.addEventListener('click', clearRegion);
+$('ask-new').addEventListener('click', newThread);
+$('ask-close').addEventListener('click', () => setAskOpen(false));
+$('ask-key-save').addEventListener('click', () => {
+  void (async () => {
+    const status = await window.betterboard.aiSetKey(askKeyInput.value);
+    askKeyInput.value = '';
+    keyIsSet = status.set;
+    askKeyBlock.classList.toggle('hidden', status.set);
+    askKeyNote.textContent = status.set ? `Saved key ends in ${status.hint}.` : 'That did not look like a key.';
+    askSend.disabled = !status.set;
+  })();
+});
+askKeyInput.addEventListener('keydown', (e) => e.stopPropagation());
+
 // ---- lasso selection ------------------------------------------------------
 
 // The ants only crawl while there is something to outline, so an idle board
@@ -1054,6 +1286,10 @@ canvas.addEventListener('pointerdown', (e) => {
     eraserCursor = { x: e.offsetX, y: e.offsetY };
     eraseAt(e);
     requestRender();
+  } else if (tool === 'ask' && e.button === 0) {
+    drag = { kind: 'region', x0: e.offsetX, y0: e.offsetY };
+    regionDrag = quadFromScreenRect(e.offsetX, e.offsetY, e.offsetX, e.offsetY);
+    requestRender();
   } else if (tool === 'select' && e.button === 0) {
     const w = toWorld(camera, e.offsetX, e.offsetY);
     if (selection && pointInPolygon(selection.poly, w.x, w.y)) {
@@ -1102,6 +1338,11 @@ canvas.addEventListener('pointermove', (e) => {
     requestRender();
     return;
   }
+  if (drag.kind === 'region') {
+    regionDrag = quadFromScreenRect(drag.x0, drag.y0, e.offsetX, e.offsetY);
+    requestRender();
+    return;
+  }
   if (drag.kind === 'lasso') {
     for (const ev of e.getCoalescedEvents?.() ?? [e]) addLassoPoint(ev);
     requestRender();
@@ -1145,6 +1386,9 @@ function endGesture(e: PointerEvent): void {
     addLassoPoint(e);
     commitLasso();
     syncAnts();
+  } else if (drag.kind === 'region') {
+    regionDrag = null;
+    captureRegion(drag.x0, drag.y0, e.offsetX, e.offsetY);
   } else if (drag.kind === 'move' && selection) {
     // Commit once, as a single undo step, and carry the outline along with it.
     board.moveStrokes(selection.ids, moveX, moveY);
@@ -1204,6 +1448,11 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     stopPlayback();
     clearSelection();
+    if (regionDrag) {
+      regionDrag = null;
+      drag = null;
+      requestRender();
+    }
     return;
   }
   if (e.key === 'Enter') {
@@ -1232,6 +1481,15 @@ window.addEventListener('keydown', (e) => {
       break;
     case 's':
       setTool(tool === 'select' ? 'pen' : 'select');
+      break;
+    case 'a':
+      if (tool === 'ask') {
+        setTool('pen');
+        setAskOpen(false);
+      } else {
+        setTool('ask');
+        setAskOpen(true);
+      }
       break;
     case 'h':
       setTool('hand');
@@ -1384,6 +1642,15 @@ window.betterboard.onMenu((action) => {
     case 'toggle-theme':
       toggleTheme();
       break;
+    case 'ai-key':
+      setAskOpen(true);
+      askKeyBlock.classList.remove('hidden');
+      askKeyInput.focus();
+      break;
+    case 'ask-region':
+      setTool('ask');
+      setAskOpen(true);
+      break;
     case 'toggle-layers':
       setLayersOpen(!layersOpen);
       break;
@@ -1438,6 +1705,7 @@ window.betterboard.onMenu((action) => {
 toolButtons.pen.addEventListener('click', () => setTool('pen'));
 toolButtons.eraser.addEventListener('click', () => setTool('eraser'));
 toolButtons.select.addEventListener('click', () => setTool('select'));
+toolButtons.ask.addEventListener('click', () => setTool('ask'));
 toolButtons.hand.addEventListener('click', () => setTool('hand'));
 
 for (const c of SWATCHES) {

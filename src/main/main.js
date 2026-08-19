@@ -9,6 +9,7 @@ const isMac = process.platform === 'darwin';
 const userData = () => app.getPath('userData');
 const autosavePath = () => path.join(userData(), 'autosave.json');
 const windowStatePath = () => path.join(userData(), 'window.json');
+const settingsPath = () => path.join(userData(), 'settings.json');
 
 let win = null;
 
@@ -80,6 +81,9 @@ function buildMenu() {
         { label: 'Save As…', accelerator: 'CmdOrCtrl+S', click: () => send('save') },
         { label: 'Export PNG…', accelerator: 'CmdOrCtrl+E', click: () => send('export') },
         { type: 'separator' },
+        { label: 'Ask Claude About a Region', accelerator: 'CmdOrCtrl+Alt+A', click: () => send('ask-region') },
+        { label: 'Claude API Key…', click: () => send('ai-key') },
+        { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
     },
@@ -142,7 +146,75 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// ---- Claude ---------------------------------------------------------------
+// The request lives in the main process rather than the renderer: the
+// renderer's CSP allows no external origins, and the key stays out of page
+// context entirely. It is read from disk per request and never logged, echoed
+// back, or sent anywhere but the API.
+
+const { askClaude } = require('./claude');
+
+// Overridable so the request path can be pointed at a local server under test.
+const API_URL = process.env.BETTERBOARD_API_URL || undefined;
+
+function readKey() {
+  return readJSON(settingsPath())?.anthropicKey ?? '';
+}
+
+function writeSettings(patch) {
+  const current = readJSON(settingsPath()) ?? {};
+  fs.writeFileSync(settingsPath(), JSON.stringify({ ...current, ...patch }), { mode: 0o600 });
+  try {
+    fs.chmodSync(settingsPath(), 0o600); // an existing file keeps its old mode
+  } catch {}
+}
+
+let inFlight = null;
+
+function aiSend(channel, payload) {
+  win?.webContents.send(channel, payload);
+}
+
+async function runAsk({ messages, model }) {
+  inFlight?.abort();
+  const controller = new AbortController();
+  inFlight = controller;
+  await askClaude({
+    url: API_URL,
+    key: readKey(),
+    model,
+    messages,
+    signal: controller.signal,
+    onDelta: (text) => aiSend('ai:delta', text),
+    onError: (message) => aiSend('ai:error', message),
+    onDone: () => aiSend('ai:done'),
+  });
+  if (inFlight === controller) inFlight = null;
+}
+
 function registerIpc() {
+  // Only ever reports whether a key exists and its last four characters, so the
+  // secret itself never travels back into the renderer.
+  ipcMain.handle('ai:key-status', () => {
+    const key = readKey();
+    return { set: key.length > 0, hint: key ? key.slice(-4) : '' };
+  });
+
+  ipcMain.handle('ai:set-key', (_e, key) => {
+    writeSettings({ anthropicKey: typeof key === 'string' ? key.trim() : '' });
+    const stored = readKey();
+    return { set: stored.length > 0, hint: stored ? stored.slice(-4) : '' };
+  });
+
+  ipcMain.handle('ai:ask', (_e, payload) => {
+    void runAsk(payload);
+  });
+
+  ipcMain.handle('ai:cancel', () => {
+    inFlight?.abort();
+    inFlight = null;
+  });
+
   ipcMain.handle('board:autosave', (_e, json) => {
     fs.writeFileSync(autosavePath(), json);
   });

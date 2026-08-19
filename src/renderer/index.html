@@ -23,6 +23,9 @@
         <button id="tool-select" class="tool" title="Select (S) — lasso an area, then drag it. ⌫ deletes, Esc deselects">
           <svg viewBox="0 0 24 24"><path d="M12 3.6c4.4 0 8 2.5 8 5.6s-3.6 5.6-8 5.6-8-2.5-8-5.6 3.6-5.6 8-5.6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.6 2.8" stroke-linecap="round"/><path d="M8.2 14.2c-.9 1.6-.7 3 .4 3.7a1.7 1.7 0 1 1-1.6 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>
+        <button id="tool-ask" class="tool" title="Ask Claude (A) — drag a box around anything to ask about it">
+          <svg viewBox="0 0 24 24"><path d="M20 12.6A7.4 7.4 0 0 1 12.6 20H5.2A1.2 1.2 0 0 1 4 18.8v-7.4A7.4 7.4 0 0 1 11.4 4h1.2A7.4 7.4 0 0 1 20 11.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 10.2a2.1 2.1 0 1 1 2.6 2.5v1.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12.5" cy="16.4" r="0.9" fill="currentColor"/></svg>
+        </button>
         <button id="tool-hand" class="tool" title="Hand — pan (H or Space)">
           <svg viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V10m0-4.5a1.5 1.5 0 0 1 3 0V11m0-3.5a1.5 1.5 0 0 1 3 0V14a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-2.7l-2.4-3.6a1.5 1.5 0 0 1 2.4-1.8L7 14V7a1.5 1.5 0 0 1 3 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -71,6 +74,42 @@
   </header>
 
   <canvas id="board"></canvas>
+
+  <aside id="ask" class="ask hidden">
+    <header class="ask-head">
+      <span class="ask-title">Ask Claude</span>
+      <select id="ask-model" title="Model">
+        <option value="claude-sonnet-5">Sonnet</option>
+        <option value="claude-opus-5">Opus</option>
+        <option value="claude-haiku-4-5-20251001">Haiku</option>
+      </select>
+      <button id="ask-new" class="mini" title="New thread">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <button id="ask-close" class="mini" title="Close (A)">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+
+    <div id="ask-key" class="ask-key hidden">
+      <p>Paste an Anthropic API key to ask about a region. It is stored on this machine only, and used only for these requests.</p>
+      <input type="password" id="ask-key-input" placeholder="sk-ant-..." autocomplete="off" spellcheck="false" />
+      <button id="ask-key-save" class="ask-send">Save key</button>
+      <p class="ask-key-note" id="ask-key-note"></p>
+    </div>
+
+    <div id="ask-thread" class="ask-thread">
+      <p class="ask-empty" id="ask-empty">Pick the <b>Ask</b> tool and drag a box around part of your board, then ask a question about it.</p>
+    </div>
+
+    <form class="ask-compose" id="ask-compose">
+      <textarea id="ask-input" rows="2" placeholder="Ask about the boxed area…" spellcheck="false"></textarea>
+      <div class="ask-compose-row">
+        <button type="button" id="ask-forget" class="ask-ghost hidden" title="Drop the attached region">Clear region</button>
+        <button type="submit" id="ask-send" class="ask-send">Ask</button>
+      </div>
+    </form>
+  </aside>
 
   <aside id="layers" class="layers hidden">
     <header class="layers-head">

@@ -22,6 +22,7 @@ betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designe
 - **Lasso select** — loop your pen around anything to select it, then drag the marching-ants outline to move it; `⌫` deletes the selection, `Esc` drops it
 - **Layers** — add, delete, rename, reorder by dragging, hide, and dim. Opacity composites the finished layer rather than each stroke, so overlaps never show seams — drop a sketch to 30% and ink over it cleanly. Drawing, erasing and selecting stay on the active layer, so what's underneath is safe
 - **Animation** — a timeline of frames, each with the full layer stack. Add, duplicate, delete and drag frames into order, set the frame rate, and play the loop back. Onion skinning ghosts the frames either side, tinted red behind and teal ahead, with adjustable reach and strength
+- **Ask Claude** — box any part of the board and ask about it. The crop is re-rendered clean (no grid, no onion ghosts, no selection outlines) and sent with your question; the reply streams into a narrow side panel you can keep asking follow-ups in
 - **Normalize zoom** — one press rebases the current view as the new 100%, restoring the full zoom range without moving a pixel; when you hit the zoom-out floor, the button pulses to offer it
 - **Undo / redo**, dark & light board themes, autosave and session restore
 - **Save / open** boards as JSON, **export** the current frame's visible layers as PNG
@@ -64,6 +65,8 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Normalize zoom | `⇧⌘N` or the ⤢ button in the zoom pill |
 | Rotate | hold `R` and drag the dial — snaps near 45° steps; double-click the dial to reset, `⌘1` also squares the view |
 | Tools | `B`/`P` pen · `E` toggles eraser/pen · `S` toggles lasso/pen · `H` hand |
+| Ask Claude about a region | `A`, then drag a box (or `⌥⌘A`) |
+| Send · newline · new thread | `Enter` · `⇧Enter` · `+` in the panel |
 | Timeline | `T` or `⌘T` |
 | Play / pause | `Enter` (or `⌘↩`) |
 | Previous / next frame | `←` / `→` |
@@ -79,6 +82,17 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | New / open / save / export | `⌘N` / `⌘O` / `⌘S` / `⌘E` |
 | Dot grid · board theme | `⌘G` · `⇧⌘L` |
 | Clear frame | `⌘⌫` |
+
+## Asking Claude
+
+The Ask tool boxes a region, re-renders just that area as a PNG, and sends it with your question to the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages). Replies stream into the side panel, and follow-ups keep the thread — the image is sent once, not with every turn.
+
+It is entirely opt-in and off until you add a key: **File → Claude API Key…**, or the prompt in the panel. Worth knowing before you turn it on:
+
+- The key is written to `settings.json` in the app's user-data directory with `0600` permissions. It never enters the renderer — requests are made from the main process — and only its last four characters are ever read back for display.
+- Nothing leaves your machine unless you press Ask. What goes is exactly one thing: the cropped image and the messages in that thread. No other frames, layers, or board contents.
+- Conversations are held in memory for the session only. They are not written into board files, so a `.betterboard.json` you share carries no chat history.
+- Requests go to `api.anthropic.com` and nowhere else, and are billed to your own account. Sonnet is the default; Opus and Haiku are in the panel's picker.
 
 ## File format
 
