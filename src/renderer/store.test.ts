@@ -11,7 +11,13 @@ class TestPath2D {
   addPath(): void {}
 }
 
-Object.assign(globalThis, { Path2D: TestPath2D });
+// hydrate() decodes through an Image element; tests only need it to not throw.
+class TestImage {
+  onload: (() => void) | null = null;
+  src = '';
+}
+
+Object.assign(globalThis, { Path2D: TestPath2D, Image: TestImage });
 
 function stroke(id: string, seq: number, board: Board): Stroke {
   return {
@@ -105,6 +111,67 @@ describe('Board.replaceStrokes', () => {
 
     board.redo();
     expect(board.strokes.map((item) => item.id)).toEqual(['a1', 'a2', 'b']);
+  });
+});
+
+describe('Board.setImageSrc', () => {
+  test('swaps the bitmap as one undoable operation', () => {
+    const board = new Board();
+    const picture = image('picture', 0, board);
+    board.images.push(picture);
+
+    board.setImageSrc('picture', 'data:image/png;base64,edited');
+    expect(picture.src).toBe('data:image/png;base64,edited');
+
+    board.undo();
+    expect(board.images[0].src).toBe('data:image/png;base64,');
+    board.redo();
+    expect(board.images[0].src).toBe('data:image/png;base64,edited');
+  });
+
+  test('an unchanged src records nothing', () => {
+    const board = new Board();
+    board.images.push(image('picture', 0, board));
+    board.setImageSrc('picture', 'data:image/png;base64,');
+    expect(board.canUndo).toBe(false);
+  });
+});
+
+describe('Board.replaceStrokes with image changes', () => {
+  test('ink clipping and pixel erasing undo together as one step', () => {
+    const board = new Board();
+    const a = stroke('a', 0, board);
+    const picture = image('picture', 1, board);
+    board.strokes.push(a);
+    board.images.push(picture);
+    picture.src = 'data:image/png;base64,erased'; // the gesture already painted it
+
+    board.replaceStrokes(
+      [{ index: 0, before: a, after: [] }],
+      [{ id: 'picture', from: 'data:image/png;base64,', to: 'data:image/png;base64,erased' }]
+    );
+    expect(board.strokes).toHaveLength(0);
+    expect(picture.src).toBe('data:image/png;base64,erased');
+
+    board.undo();
+    expect(board.strokes.map((item) => item.id)).toEqual(['a']);
+    expect(board.images[0].src).toBe('data:image/png;base64,');
+    expect(board.canUndo).toBe(false);
+
+    board.redo();
+    expect(board.strokes).toHaveLength(0);
+    expect(board.images[0].src).toBe('data:image/png;base64,erased');
+  });
+
+  test('image-only changes still make an undoable step', () => {
+    const board = new Board();
+    const picture = image('picture', 0, board);
+    board.images.push(picture);
+    picture.src = 'data:image/png;base64,erased';
+
+    board.replaceStrokes([], [{ id: 'picture', from: 'data:image/png;base64,', to: 'data:image/png;base64,erased' }]);
+    board.undo();
+    expect(board.images[0].src).toBe('data:image/png;base64,');
   });
 });
 

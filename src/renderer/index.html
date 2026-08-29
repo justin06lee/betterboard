@@ -34,11 +34,22 @@
         </button>
         <div id="eraser-modes" class="eraser-modes hidden" role="group" aria-label="Eraser mode">
           <button type="button" data-eraser-mode="stroke" title="Remove whole strokes">Stroke</button>
-          <button type="button" data-eraser-mode="area" title="Remove only ink under the eraser circle">Area</button>
+          <button type="button" data-eraser-mode="area" title="Erase ink and image pixels under the eraser circle">Area</button>
         </div>
         <button id="tool-select" class="tool" title="Select (S) — lasso an area, then drag it. ⌫ deletes, Esc deselects">
           <svg viewBox="0 0 24 24"><path d="M12 3.6c4.4 0 8 2.5 8 5.6s-3.6 5.6-8 5.6-8-2.5-8-5.6 3.6-5.6 8-5.6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.6 2.8" stroke-linecap="round"/><path d="M8.2 14.2c-.9 1.6-.7 3 .4 3.7a1.7 1.7 0 1 1-1.6 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>
+        <button id="tool-wand" class="tool" title="Magic wand (W) — click a picture to select its color region">
+          <svg viewBox="0 0 24 24"><path d="M4.5 19.5l8.3-8.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15 5.6l1 2.4 2.4 1-2.4 1-1 2.4-1-2.4-2.4-1 2.4-1z" fill="currentColor"/><path d="M20 12.8l.55 1.3 1.3.55-1.3.55-.55 1.3-.55-1.3-1.3-.55 1.3-.55z" fill="currentColor"/><path d="M9.6 3.4l.5 1.2 1.2.5-1.2.5-.5 1.2-.5-1.2-1.2-.5 1.2-.5z" fill="currentColor"/></svg>
+        </button>
+        <div id="wand-modes" class="eraser-modes hidden" role="group" aria-label="Magic wand mode">
+          <button type="button" data-wand-mode="point" title="Select the color region under the click">Point</button>
+          <button type="button" data-wand-mode="background" title="Click a picture to select its whole background">Background</button>
+          <label class="wand-tolerance" title="Tolerance — how far a color may drift and still be selected">
+            <input type="range" id="wand-tolerance" min="0" max="120" step="1" value="32" />
+            <span id="wand-tolerance-val">32</span>
+          </label>
+        </div>
         <button id="tool-ask" class="tool" title="Ask / Draw (A) — box a region to discuss or annotate it">
           <svg viewBox="0 0 24 24"><path d="M20 12.6A7.4 7.4 0 0 1 12.6 20H5.2A1.2 1.2 0 0 1 4 18.8v-7.4A7.4 7.4 0 0 1 11.4 4h1.2A7.4 7.4 0 0 1 20 11.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 10.2a2.1 2.1 0 1 1 2.6 2.5v1.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12.5" cy="16.4" r="0.9" fill="currentColor"/></svg>
         </button>
@@ -224,6 +235,38 @@
       <input type="checkbox" id="onion-tint" checked />
       <span>Tint past red, future teal</span>
     </label>
+  </div>
+
+  <div id="wand-actions" class="wand-actions hidden">
+    <span class="wand-hint">Selected by color</span>
+    <button id="wand-cut" title="Make the selected pixels transparent (⌫)">Erase selected</button>
+    <button id="wand-keep" title="Keep only the selected pixels; everything else goes transparent">Keep only</button>
+  </div>
+
+  <div id="welcome" class="welcome hidden">
+    <div class="welcome-card">
+      <h1>What brings you to BetterBoard?</h1>
+      <p>This only arranges the starting layout — every tool stays available, and you can change it any time from View&nbsp;→&nbsp;Choose&nbsp;Workspace.</p>
+      <div class="welcome-options">
+        <button data-persona="student">
+          <b>Student</b>
+          <span>A clean board with a dot grid — notes, diagrams, thinking out loud.</span>
+        </button>
+        <button data-persona="artist">
+          <b>Artist</b>
+          <span>Brushes and layers front and center for drawing and painting.</span>
+        </button>
+        <button data-persona="animator">
+          <b>Animator</b>
+          <span>The timeline open and ready for frame-by-frame animation.</span>
+        </button>
+        <button data-persona="photo">
+          <b>Photo editor</b>
+          <span>Magic wand, background removal and pixel erasing on your images.</span>
+        </button>
+      </div>
+      <button id="welcome-skip" class="welcome-skip">Keep the current layout</button>
+    </div>
   </div>
 
   <div class="zoom-pill">

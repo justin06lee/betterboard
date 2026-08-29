@@ -6,6 +6,12 @@ const path = require('path');
 
 app.setName('BetterBoard');
 
+// Lets automated drivers point the app at a scratch profile, so a test run
+// never touches the real autosave, window state, or settings.
+if (process.env.BETTERBOARD_USER_DATA) {
+  app.setPath('userData', process.env.BETTERBOARD_USER_DATA);
+}
+
 const isMac = process.platform === 'darwin';
 
 // Finder-launched apps inherit a minimal PATH, so Yagami would miss binaries
@@ -176,6 +182,8 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Toggle Dot Grid', accelerator: 'CmdOrCtrl+G', click: () => send('toggle-grid') },
         { label: 'Toggle Light/Dark Board', accelerator: 'Shift+CmdOrCtrl+L', click: () => send('toggle-theme') },
+        { type: 'separator' },
+        { label: 'Choose Workspace…', click: () => send('choose-workspace') },
         { type: 'separator' },
         { role: 'togglefullscreen' },
         { role: 'toggleDevTools' },

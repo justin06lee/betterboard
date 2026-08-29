@@ -6,13 +6,14 @@ export type Op =
   | { type: 'add'; stroke: Stroke }
   | { type: 'add-many'; strokes: Stroke[] }
   | { type: 'remove'; removed: { index: number; stroke: Stroke }[] }
-  | { type: 'replace'; changes: StrokeReplacement[] }
+  | { type: 'replace'; changes: StrokeReplacement[]; imageChanges?: ImageSrcChange[] }
   | { type: 'clear'; strokes: { index: number; stroke: Stroke }[]; images: { index: number; image: BoardImage }[] }
   | { type: 'scale'; factor: number }
   | { type: 'move'; ids: string[]; images: string[]; dx: number; dy: number }
   | { type: 'image-add'; image: BoardImage }
   | { type: 'image-remove'; removed: { index: number; image: BoardImage }[] }
   | { type: 'image-resize'; id: string; from: Rect; to: Rect }
+  | { type: 'image-src'; id: string; from: string; to: string }
   | { type: 'layer-add'; index: number; layer: Layer }
   | { type: 'layer-remove'; index: number; layer: Layer; removed: { index: number; stroke: Stroke }[]; removedImages: BoardImage[] }
   | { type: 'layer-order'; from: number; to: number }
@@ -31,6 +32,13 @@ export interface StrokeReplacement {
   index: number;
   before: Stroke;
   after: Stroke[];
+}
+
+// A pixel edit to a placed picture: the whole bitmap swaps, so undo is exact.
+export interface ImageSrcChange {
+  id: string;
+  from: string;
+  to: string;
 }
 
 const MAX_UNDO = 500;
@@ -119,6 +127,26 @@ export class Board {
   private applyRectById(id: string, r: Rect): void {
     const image = this.images.find((im) => im.id === id);
     if (image) this.applyRect(image, r);
+  }
+
+  // Swaps a picture's bitmap for an edited one (wand cut-out, pixel erase).
+  setImageSrc(id: string, to: string): void {
+    const image = this.images.find((im) => im.id === id);
+    if (!image || image.src === to) return;
+    const from = image.src;
+    this.applyImageSrc(image, to);
+    this.push({ type: 'image-src', id, from, to });
+  }
+
+  private applyImageSrc(image: BoardImage, src: string): void {
+    image.src = src;
+    image.el = undefined;
+    this.hydrate(image);
+  }
+
+  private applyImageSrcById(id: string, src: string): void {
+    const image = this.images.find((im) => im.id === id);
+    if (image) this.applyImageSrc(image, src);
   }
 
   imagesOn(frame: string = this.activeFrame): BoardImage[] {
@@ -363,13 +391,20 @@ export class Board {
     this.push({ type: 'remove', removed });
   }
 
-  // Replaces one or more strokes with clipped fragments. Keeping this as one
-  // operation is what makes an entire area-eraser gesture undo in one step.
-  replaceStrokes(changes: StrokeReplacement[]): void {
-    if (changes.length === 0) return;
+  // Replaces one or more strokes with clipped fragments, optionally alongside
+  // pixel edits to pictures the same gesture touched. Keeping all of it one
+  // operation is what makes an entire area-eraser pass undo in one step.
+  // Image edits arrive already painted — the gesture drew straight onto each
+  // picture's working canvas — so only the source strings still have to move.
+  replaceStrokes(changes: StrokeReplacement[], imageChanges: ImageSrcChange[] = []): void {
+    if (changes.length === 0 && imageChanges.length === 0) return;
     const sorted = [...changes].sort((a, b) => a.index - b.index);
     this.applyStrokeReplacements(sorted, true);
-    this.push({ type: 'replace', changes: sorted });
+    for (const change of imageChanges) {
+      const image = this.images.find((im) => im.id === change.id);
+      if (image) image.src = change.to;
+    }
+    this.push({ type: 'replace', changes: sorted, imageChanges });
   }
 
   private applyStrokeReplacements(changes: StrokeReplacement[], forward: boolean): void {
@@ -498,6 +533,7 @@ export class Board {
       }
     } else if (op.type === 'replace') {
       this.applyStrokeReplacements(op.changes, false);
+      for (const change of op.imageChanges ?? []) this.applyImageSrcById(change.id, change.from);
     } else if (op.type === 'clear') {
       for (const { index, stroke } of op.strokes) {
         this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
@@ -515,6 +551,8 @@ export class Board {
       }
     } else if (op.type === 'image-resize') {
       this.applyRectById(op.id, op.from);
+    } else if (op.type === 'image-src') {
+      this.applyImageSrcById(op.id, op.from);
     } else if (op.type === 'layer-add') {
       this.layers.splice(op.index, 1);
       if (this.activeLayer === op.layer.id) {
@@ -567,6 +605,7 @@ export class Board {
       this.strokes = this.strokes.filter((s) => !ids.has(s.id));
     } else if (op.type === 'replace') {
       this.applyStrokeReplacements(op.changes, true);
+      for (const change of op.imageChanges ?? []) this.applyImageSrcById(change.id, change.to);
     } else if (op.type === 'clear') {
       const strokeIds = new Set(op.strokes.map(({ stroke }) => stroke.id));
       const imageIds = new Set(op.images.map(({ image }) => image.id));
@@ -581,6 +620,8 @@ export class Board {
       this.images = this.images.filter((im) => !gone.has(im.id));
     } else if (op.type === 'image-resize') {
       this.applyRectById(op.id, op.to);
+    } else if (op.type === 'image-src') {
+      this.applyImageSrcById(op.id, op.to);
     } else if (op.type === 'layer-add') {
       this.layers.splice(op.index, 0, op.layer);
       this.activeLayer = op.layer.id;
