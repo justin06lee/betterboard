@@ -212,6 +212,10 @@
       <button id="frame-del" class="mini" title="Delete frame">
         <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5.5A1.5 1.5 0 0 1 11.5 4h1A1.5 1.5 0 0 1 14 5.5V7m-7 0l.8 11.1A1.9 1.9 0 0 0 9.7 20h4.6a1.9 1.9 0 0 0 1.9-1.9L17 7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
+      <div class="sep"></div>
+      <button id="frame-export" class="mini" title="Export animation as a video or GIF (⇧⌘E)">
+        <svg viewBox="0 0 24 24"><path d="M12 3.5v10m0 0l-3.5-3.5M12 13.5l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.5 16v2.5a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
     </div>
   </div>
 
@@ -241,6 +245,46 @@
     <span class="wand-hint">Selected by color</span>
     <button id="wand-cut" title="Make the selected pixels transparent (⌫)">Erase selected</button>
     <button id="wand-keep" title="Keep only the selected pixels; everything else goes transparent">Keep only</button>
+  </div>
+
+  <div id="export-anim" class="welcome hidden">
+    <div class="welcome-card">
+      <h1>Export animation</h1>
+      <p id="export-anim-blurb">Every frame of the timeline, rendered at its own size and written out as one file.</p>
+      <div class="export-rows">
+        <label>
+          <span>Format</span>
+          <select id="export-anim-format">
+            <option value="mp4">MP4 — H.264 video</option>
+            <option value="webm">WebM — VP9 video</option>
+            <option value="gif">GIF — animated image</option>
+          </select>
+        </label>
+        <label>
+          <span>Frame rate</span>
+          <span class="export-fps">
+            <input type="number" id="export-anim-fps" min="1" max="60" step="1" value="12" />
+            <em>fps</em>
+          </span>
+        </label>
+        <label>
+          <span>Size</span>
+          <select id="export-anim-size">
+            <option value="480">Small — 480 px</option>
+            <option value="720">Medium — 720 px</option>
+            <option value="1080" selected>Large — 1080 px</option>
+            <option value="1440">Extra large — 1440 px</option>
+            <option value="2160">Maximum — 2160 px</option>
+          </select>
+        </label>
+      </div>
+      <p class="export-note" id="export-anim-note"></p>
+      <div class="export-bar hidden" id="export-anim-bar"><div id="export-anim-fill"></div></div>
+      <div class="export-actions">
+        <button type="button" id="export-anim-close" class="ask-ghost">Cancel</button>
+        <button type="button" id="export-anim-go" class="ask-send">Export</button>
+      </div>
+    </div>
   </div>
 
   <div id="welcome" class="welcome hidden">

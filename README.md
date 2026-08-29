@@ -28,7 +28,8 @@ betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designe
 - **Ask / Draw through Yagami** — box any part of the board to discuss it or ask the model to circle, connect, annotate, and sketch directly into the selected region. Model drawings are ordinary vector strokes with one-step undo. Use the signed-in coding-agent binaries on this computer directly, or connect to a remote personal Yagami server
 - **Normalize zoom** — one press rebases the current view as the new 100%, restoring the full zoom range without moving a pixel; when you hit the zoom-out floor, the button pulses to offer it
 - **Undo / redo**, dark & light board themes, autosave and session restore
-- **Save / open** boards as JSON, **export** the current frame's visible layers as PNG
+- **Export** — the current frame's visible layers as a PNG, or the whole timeline as an **MP4**, **WebM** or **animated GIF**. Every frame renders into one canvas sized to fit the whole animation, so nothing shifts between frames; pick the frame rate and the size, and watch it encode
+- **Save / open** boards as JSON
 
 ## Install
 
@@ -51,7 +52,7 @@ bun run dev     # build renderer + launch Electron
 bun run build   # typecheck + bundle (production build)
 ```
 
-The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bun build`. The Electron main process lives in `src/main`, the renderer in `src/renderer`.
+The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bun build`. The Electron main process lives in `src/main`, the renderer in `src/renderer`. Animation export encodes in the renderer — video through the browser's own WebCodecs encoders, muxed by [mediabunny](https://mediabunny.dev), and GIF through [gifenc](https://github.com/mattdesl/gifenc) — and hands the finished bytes to the main process, which only picks the file and writes it.
 
 ## Controls
 
@@ -88,7 +89,8 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Layer opacity · rename · reorder | The panel slider · double-click its name · drag its row |
 | Stroke size | `[` and `]` or the slider |
 | Undo / redo | `⌘Z` / `⇧⌘Z` |
-| New / open / save / export | `⌘N` / `⌘O` / `⌘S` / `⌘E` |
+| New / open / save | `⌘N` / `⌘O` / `⌘S` |
+| Export PNG · export animation | `⌘E` · `⇧⌘E`, or ⤓ in the timeline |
 | Dot grid · board theme | `⌘G` · `⇧⌘L` |
 | Choose workspace | View → Choose Workspace… |
 | Clear frame | `⌘⌫` |
@@ -119,6 +121,5 @@ Boards are JSON (version 5): lists of frames and of layers (`name`, `opacity`, `
 
 - Custom app icon
 - Scale and rotate a selection, copy/paste between boards and frames
-- Export an animation as GIF or video
 - Shapes and text
 - Pen tilt support

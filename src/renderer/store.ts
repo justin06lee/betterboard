@@ -660,6 +660,25 @@ export class Board {
     return op;
   }
 
+  // The bounds of everything visible across the whole timeline. An animation
+  // export renders every frame into one fixed canvas, so the box has to cover
+  // all of them — measuring each frame on its own would make the drawing jump
+  // between frames as its own content grew and shrank.
+  animationBBox(): BBox | null {
+    let box: BBox | null = null;
+    for (const frame of this.frames) {
+      const b = this.contentBBox(this.visibleStrokes(frame.id), this.visibleImages(frame.id));
+      if (!b) continue;
+      if (!box) {
+        box = b;
+        continue;
+      }
+      growBBox(box, b.minX, b.minY, 0);
+      growBBox(box, b.maxX, b.maxY, 0);
+    }
+    return box;
+  }
+
   contentBBox(strokes: Stroke[] = this.strokes, images: BoardImage[] = []): BBox | null {
     if (strokes.length === 0 && images.length === 0) return null;
     const b = emptyBBox();
