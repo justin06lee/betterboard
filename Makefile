@@ -10,7 +10,7 @@ all: build install launch
 update: all
 
 clean:
-	rm -rf out dist node_modules
+	rm -rf out dist dist-main node_modules
 
 # Regenerates the whole mark from its one generator: the SVG the README and the
 # app icon share, every raster size, and the .icns. Not part of the golden path
@@ -134,12 +134,13 @@ stop:
 
 endif
 
-# Shared: copy the app sources into the bundle's resources/app directory.
-# Whole directories rather than named files — listing them by hand meant a new
-# main-process module could be added and silently left out of the bundle.
+# Shared: copy the bundled main process, its preload bridge, and renderer into
+# Electron's resources directory. Yagami and its runtime dependencies are
+# already contained in main.mjs, so the installed app needs no node_modules.
 bundle-app:
-	mkdir -p "$(APP_RES)/src/main" "$(APP_RES)/dist"
+	mkdir -p "$(APP_RES)/src/main" "$(APP_RES)/dist" "$(APP_RES)/dist-main"
 	cp package.json "$(APP_RES)/"
-	cp -R src/main/. "$(APP_RES)/src/main/"
+	cp dist-main/main.mjs "$(APP_RES)/dist-main/main.mjs"
+	cp src/main/preload.js "$(APP_RES)/src/main/preload.js"
 	cp -R dist/. "$(APP_RES)/dist/"
 	@node scripts/check-bundle.js "$(APP_RES)"

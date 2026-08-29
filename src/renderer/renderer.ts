@@ -1,6 +1,9 @@
 import { buildPath, strokeHit } from './ink';
+import { eraseStrokePoints } from './erase';
+import { drawingToLines } from './ai-drawing';
+import type { AiConnection, AiConnectionKind, AiConnectionState } from './global';
 import type { Ghost } from './render';
-import type { Rect } from './store';
+import type { Rect, StrokeReplacement } from './store';
 import { HANDLE, render, renderExport, renderRegion } from './render';
 import { Board } from './store';
 import type { BoardImage, BrushId, Camera, Point, Stroke } from './types';
@@ -30,6 +33,7 @@ import {
 
 type Tool = 'pen' | 'eraser' | 'select' | 'ask' | 'hand';
 type ThemeName = 'dark' | 'light';
+type EraserMode = 'stroke' | 'area';
 
 const ERASER_RADIUS = 16; // screen px
 const MIN_DIST = 0.75; // screen px between recorded points
@@ -49,6 +53,7 @@ let brush: BrushId = 'pen';
 let size = 6;
 let themeName: ThemeName = 'dark';
 let grid = true;
+let eraserMode: EraserMode = 'stroke';
 let layersOpen = true;
 let timelineOpen = false;
 let playing = false;
@@ -58,6 +63,8 @@ let live: Stroke | null = null;
 let spaceHeld = false;
 let eraserCursor: { x: number; y: number } | null = null;
 const erasePending = new Set<string>();
+const areaEraseChanges = new Map<string, StrokeReplacement>();
+let areaEraseLast: Point | null = null;
 
 // The lasso path while it is being drawn, then the committed selection it
 // produced. Both live in world coordinates, so they stay put under pan, zoom
@@ -98,6 +105,8 @@ const toolButtons: Record<Exclude<Tool, 'pen'>, HTMLElement> = {
   ask: $('tool-ask'),
   hand: $('tool-hand'),
 };
+const eraserModes = $('eraser-modes');
+const eraserModeButtons = [...eraserModes.querySelectorAll<HTMLButtonElement>('[data-eraser-mode]')];
 const brushButtons: Record<BrushId, HTMLElement> = {
   pen: $('tool-pen'),
   pixel: $('brush-pixel'),
@@ -144,15 +153,16 @@ function requestRender(): void {
   requestAnimationFrame(() => {
     dirty = false;
     const frame = board.activeFrame;
-    const strokes = board.strokes.filter(
-      (s) => s.frame === frame && !erasePending.has(s.id)
-    );
+    const strokes = board.strokes.flatMap((stroke) => {
+      if (stroke.frame !== frame || erasePending.has(stroke.id)) return [];
+      return areaEraseChanges.get(stroke.id)?.after ?? [stroke];
+    });
     render(ctx, canvas, camera, strokes, {
       theme: THEMES[themeName],
       grid,
       live,
       eraser:
-        tool === 'eraser' && eraserCursor
+        (tool === 'eraser' || drag?.kind === 'erase') && eraserCursor
           ? { x: eraserCursor.x, y: eraserCursor.y, radius: ERASER_RADIUS }
           : null,
       marquee: lasso
@@ -198,7 +208,7 @@ function scheduleAutosave(): void {
 }
 
 function savePrefs(): void {
-  localStorage.setItem('bb:prefs', JSON.stringify({ tool, brush, color, size, themeName, grid, layersOpen, timelineOpen, loop }));
+  localStorage.setItem('bb:prefs', JSON.stringify({ tool, brush, color, size, themeName, grid, eraserMode, layersOpen, timelineOpen, loop }));
 }
 
 function loadPrefs(): void {
@@ -210,6 +220,7 @@ function loadPrefs(): void {
     if (Number.isFinite(p.size)) size = Math.min(28, Math.max(1, p.size));
     if (p.themeName === 'light' || p.themeName === 'dark') themeName = p.themeName;
     if (typeof p.grid === 'boolean') grid = p.grid;
+    if (p.eraserMode === 'stroke' || p.eraserMode === 'area') eraserMode = p.eraserMode;
     if (typeof p.layersOpen === 'boolean') layersOpen = p.layersOpen;
     if (typeof p.timelineOpen === 'boolean') timelineOpen = p.timelineOpen;
     if (typeof p.loop === 'boolean') loop = p.loop;
@@ -412,11 +423,23 @@ function setTool(t: Tool): void {
     el.classList.toggle('active', name === t);
   }
   syncBrushButtons();
+  eraserModes.classList.toggle('hidden', t !== 'eraser');
   if (t !== 'eraser') eraserCursor = null;
   if (t !== 'select') clearSelection();
   updateCursor();
   savePrefs();
   requestRender();
+}
+
+function setEraserMode(mode: EraserMode): void {
+  eraserMode = mode;
+  for (const button of eraserModeButtons) {
+    button.classList.toggle('active', button.dataset.eraserMode === mode);
+  }
+  toolButtons.eraser.title = mode === 'stroke'
+    ? 'Eraser (E) — remove whole strokes'
+    : 'Eraser (E) — remove only ink under the circle';
+  savePrefs();
 }
 
 function syncBrushButtons(): void {
@@ -550,6 +573,63 @@ function eraseAt(e: PointerEvent): void {
   }
 }
 
+function fragmentStroke(stroke: Stroke, points: Stroke['points'][]): Stroke[] {
+  return points.map((fragment) => {
+    const next: Stroke = {
+      ...stroke,
+      id: uid(),
+      points: fragment,
+      bbox: emptyBBox(),
+      path: undefined,
+    };
+    for (const point of fragment) growBBox(next.bbox, point.x, point.y, next.size / 2 + 2);
+    next.path = buildPath(next);
+    return next;
+  });
+}
+
+function eraseAreaAt(e: PointerEvent): void {
+  const point = toWorld(camera, e.offsetX, e.offsetY);
+  const path = areaEraseLast ? [areaEraseLast, point] : [point];
+  const radius = ERASER_RADIUS / camera.scale;
+  const eraserBox = {
+    minX: Math.min(...path.map((item) => item.x)) - radius,
+    minY: Math.min(...path.map((item) => item.y)) - radius,
+    maxX: Math.max(...path.map((item) => item.x)) + radius,
+    maxY: Math.max(...path.map((item) => item.y)) + radius,
+  };
+
+  for (let index = 0; index < board.strokes.length; index++) {
+    const original = board.strokes[index];
+    if (!editable(original) || !bboxIntersects(original.bbox, eraserBox)) continue;
+    const previous = areaEraseChanges.get(original.id)?.after ?? [original];
+    const after: Stroke[] = [];
+    let changed = false;
+    for (const fragment of previous) {
+      const result = eraseStrokePoints(fragment.points, path, radius + fragment.size / 2);
+      if (!result.changed) {
+        after.push(fragment);
+        continue;
+      }
+      changed = true;
+      after.push(...fragmentStroke(fragment, result.fragments));
+    }
+    if (changed) areaEraseChanges.set(original.id, { index, before: original, after });
+  }
+  areaEraseLast = point;
+}
+
+function beginErase(e: PointerEvent): void {
+  eraserCursor = { x: e.offsetX, y: e.offsetY };
+  if (eraserMode === 'area') {
+    areaEraseChanges.clear();
+    areaEraseLast = null;
+    eraseAreaAt(e);
+  } else {
+    eraseAt(e);
+  }
+}
+
 // ---- animation ------------------------------------------------------------
 
 // Ghost frames are rebuilt on board changes rather than per render, so drawing
@@ -586,7 +666,10 @@ function renderTimeline(): void {
   const here = board.frameIndex;
   frameLabel.textContent = `${here + 1} / ${n}`;
 
-  const filled = new Set(board.strokes.map((s) => s.frame));
+  const filled = new Set([
+    ...board.strokes.map((stroke) => stroke.frame),
+    ...board.images.map((image) => image.frame),
+  ]);
   frameStrip.textContent = '';
   board.frames.forEach((f, i) => {
     const cell = document.createElement('button');
@@ -840,6 +923,9 @@ function renderLayers(): void {
   for (const s of board.strokes) {
     if (s.frame === board.activeFrame) counts.set(s.layer, (counts.get(s.layer) ?? 0) + 1);
   }
+  for (const image of board.images) {
+    if (image.frame === board.activeFrame) counts.set(image.layer, (counts.get(image.layer) ?? 0) + 1);
+  }
 
   for (let i = board.layers.length - 1; i >= 0; i--) {
     const layer = board.layers[i];
@@ -987,7 +1073,7 @@ layerOpacityInput.addEventListener('input', () => {
   layerOpacityVal.textContent = `${layerOpacityInput.value}%`;
 });
 
-// ---- ask claude -----------------------------------------------------------
+// ---- ask / draw -----------------------------------------------------------
 
 interface AskMessage {
   role: 'user' | 'assistant';
@@ -1001,10 +1087,17 @@ const askThreadEl = $('ask-thread');
 const askInput = $('ask-input') as HTMLTextAreaElement;
 const askSend = $('ask-send') as HTMLButtonElement;
 const askForget = $('ask-forget') as HTMLButtonElement;
-const askModel = $('ask-model') as HTMLSelectElement;
-const askKeyBlock = $('ask-key');
-const askKeyInput = $('ask-key-input') as HTMLInputElement;
-const askKeyNote = $('ask-key-note');
+const askConnectionSelect = $('ask-connection') as HTMLSelectElement;
+const askSettings = $('ask-settings');
+const askConnectionName = $('ask-connection-name') as HTMLInputElement;
+const askConnectionKind = $('ask-connection-kind') as HTMLSelectElement;
+const askConnectionModel = $('ask-connection-model') as HTMLInputElement;
+const askConnectionUrl = $('ask-connection-url') as HTMLInputElement;
+const askConnectionKey = $('ask-connection-key') as HTMLInputElement;
+const askConnectionUrlRow = $('ask-connection-url-row');
+const askConnectionKeyRow = $('ask-connection-key-row');
+const askConnectionNote = $('ask-connection-note');
+const askConnectionDelete = $('ask-connection-delete') as HTMLButtonElement;
 
 // The boxed region, kept as a world-space quad so it stays pinned to the
 // drawing while you pan and zoom, plus the crop that was captured from it.
@@ -1014,7 +1107,24 @@ let thread: AskMessage[] = [];
 let pendingImage: string | null = null;
 let streamEl: HTMLElement | null = null;
 let streaming = false;
-let keyIsSet = false;
+let connections: AiConnection[] = [];
+let activeConnectionId = '';
+let editingConnectionId: string | null = null;
+let connectionUsable = false;
+let drawTarget: {
+  requestId: string;
+  quad: Point[];
+  frame: string;
+  layer: string;
+  worldPerPixel: number;
+  color: string;
+  size: number;
+  strokes: Stroke[];
+} | null = null;
+// The connection editor auto-hides once the active connection is usable. When
+// opened deliberately from the menu it stays visible until the panel closes.
+let settingsForced = false;
+let localProviderProbe = 0;
 
 function quadFromScreenRect(x0: number, y0: number, x1: number, y1: number): Point[] {
   const left = Math.min(x0, x1);
@@ -1031,15 +1141,75 @@ function quadFromScreenRect(x0: number, y0: number, x1: number, y1: number): Poi
 
 function setAskOpen(open: boolean): void {
   askPanel.classList.toggle('hidden', !open);
-  if (open) void refreshKeyStatus();
+  if (open) void refreshConnections();
+  else settingsForced = false;
 }
 
-async function refreshKeyStatus(): Promise<void> {
-  const status = await window.betterboard.aiKeyStatus();
-  keyIsSet = status.set;
-  askKeyBlock.classList.toggle('hidden', status.set);
-  askKeyNote.textContent = status.set ? `Saved key ends in ${status.hint}.` : '';
-  askSend.disabled = streaming ? false : !status.set;
+function usableConnection(connection: AiConnection | undefined): boolean {
+  if (!connection) return false;
+  return connection.kind === 'embedded' || connection.url.length > 0;
+}
+
+function activeConnection(): AiConnection | undefined {
+  return connections.find((connection) => connection.id === activeConnectionId);
+}
+
+function syncConnectionMode(kind: AiConnectionKind): void {
+  const remote = kind === 'remote';
+  askConnectionUrlRow.classList.toggle('hidden', !remote);
+  askConnectionKeyRow.classList.toggle('hidden', !remote);
+}
+
+async function showLocalProviders(): Promise<void> {
+  const probe = ++localProviderProbe;
+  askConnectionNote.textContent = 'Detecting installed coding-agent CLIs…';
+  const state = await window.betterboard.aiLocalProviders();
+  if (probe !== localProviderProbe || askConnectionKind.value !== 'embedded') return;
+  askConnectionNote.textContent = state.error
+    ? state.error
+    : `Detected on this computer: ${state.providers.join(', ')}.`;
+}
+
+function fillConnectionEditor(connection?: AiConnection): void {
+  const kind = connection?.kind ?? 'embedded';
+  editingConnectionId = connection?.id ?? null;
+  askConnectionName.value = connection?.name ?? 'This computer';
+  askConnectionKind.value = kind;
+  askConnectionModel.value = connection?.model ?? '';
+  askConnectionUrl.value = connection?.url ?? '';
+  askConnectionKey.value = '';
+  askConnectionKey.placeholder = connection?.keySet
+    ? `Saved Yagami key ends in ${connection.keyHint}`
+    : 'ygm_… or blank';
+  askConnectionDelete.disabled = !connection;
+  askConnectionNote.textContent = kind === 'embedded'
+    ? 'Uses the signed-in coding-agent CLIs installed on this computer.'
+    : connection?.keySet ? `Personal key saved (…${connection.keyHint}).` : 'No personal key saved.';
+  syncConnectionMode(kind);
+  if (kind === 'embedded') void showLocalProviders();
+}
+
+function applyConnectionState(state: AiConnectionState): void {
+  connections = state.connections;
+  activeConnectionId = state.active;
+  askConnectionSelect.textContent = '';
+  for (const connection of connections) {
+    const option = document.createElement('option');
+    option.value = connection.id;
+    option.textContent = connection.name;
+    askConnectionSelect.appendChild(option);
+  }
+  askConnectionSelect.value = activeConnectionId;
+  const connection = activeConnection();
+  connectionUsable = usableConnection(connection);
+  askSettings.classList.toggle('hidden', connectionUsable && !settingsForced);
+  askSend.disabled = streaming ? false : !connectionUsable;
+  fillConnectionEditor(connection);
+  if (state.error) askConnectionNote.textContent = state.error;
+}
+
+async function refreshConnections(): Promise<void> {
+  applyConnectionState(await window.betterboard.aiConnections());
 }
 
 function captureRegion(x0: number, y0: number, x1: number, y1: number): void {
@@ -1084,10 +1254,11 @@ function clearRegion(): void {
 
 function newThread(): void {
   if (streaming) void window.betterboard.aiCancel();
-  streaming = false;
   streamEl = null;
+  drawTarget = null;
   thread = [];
   pendingImage = region?.base64 ?? null;
+  setStreamingUi(false);
   renderThread();
 }
 
@@ -1104,12 +1275,12 @@ function renderThread(): void {
     const hint = document.createElement('p');
     hint.className = 'ask-empty';
     hint.innerHTML =
-      'Pick the <b>Ask</b> tool and drag a box around part of your board, then ask a question about it.';
+      'Pick the <b>Ask</b> tool and drag a box around part of your board. Ask a question—or ask the model to draw, circle, or connect something.';
     askThreadEl.appendChild(hint);
   }
   for (const m of thread) {
     const el = document.createElement('div');
-    el.className = `ask-msg ${m.role === 'user' ? 'user' : 'claude'}${m.error ? ' error' : ''}`;
+    el.className = `ask-msg ${m.role === 'user' ? 'user' : 'assistant'}${m.error ? ' error' : ''}`;
     el.textContent = m.text;
     askThreadEl.appendChild(el);
   }
@@ -1119,16 +1290,18 @@ function renderThread(): void {
 function setStreamingUi(on: boolean): void {
   streaming = on;
   askSend.textContent = on ? 'Stop' : 'Ask';
-  askSend.disabled = on ? false : !keyIsSet;
+  askSend.disabled = on ? false : !connectionUsable;
+  askConnectionSelect.disabled = on;
 }
 
 async function sendAsk(): Promise<void> {
   if (streaming) {
-    void window.betterboard.aiCancel();
+    await window.betterboard.aiCancel();
+    finishStream();
     return;
   }
   const text = askInput.value.trim();
-  if (!text || !keyIsSet) return;
+  if (!text || !connectionUsable || !activeConnectionId) return;
 
   const message: AskMessage = { role: 'user', text };
   if (pendingImage) {
@@ -1139,28 +1312,26 @@ async function sendAsk(): Promise<void> {
   askInput.value = '';
   renderThread();
 
-  // Built before the placeholder is added, so the empty reply is not sent back.
-  const messages = thread
-    .filter((m) => !m.error)
-    .map((m) => {
-      if (m.role === 'assistant') return { role: 'assistant' as const, content: m.text };
-      if (!m.image) return { role: 'user' as const, content: m.text };
-      return {
-        role: 'user' as const,
-        content: [
-          { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png', data: m.image } },
-          { type: 'text' as const, text: m.text },
-        ],
-      };
-    });
+  const messages = thread.filter((message) => !message.error).map(({ role, text, image }) => ({ role, text, image }));
+  const requestId = uid();
+  drawTarget = region ? {
+    requestId,
+    quad: region.quad.map((point) => ({ ...point })),
+    frame: board.activeFrame,
+    layer: board.activeLayer,
+    worldPerPixel: 1 / camera.scale,
+    color,
+    size,
+    strokes: [],
+  } : null;
 
   setStreamingUi(true);
   streamEl = document.createElement('div');
-  streamEl.className = 'ask-msg claude streaming';
+  streamEl.className = 'ask-msg assistant streaming';
   askThreadEl.appendChild(streamEl);
   askThreadEl.scrollTop = askThreadEl.scrollHeight;
 
-  await window.betterboard.aiAsk({ model: askModel.value, messages });
+  await window.betterboard.aiAsk({ requestId, connectionId: activeConnectionId, messages });
 }
 
 function finishStream(): void {
@@ -1171,6 +1342,8 @@ function finishStream(): void {
     else streamEl.remove();
   }
   streamEl = null;
+  if (drawTarget?.strokes.length) board.addStrokes(drawTarget.strokes);
+  drawTarget = null;
   setStreamingUi(false);
 }
 
@@ -1182,13 +1355,45 @@ window.betterboard.onAiDelta((text) => {
 
 window.betterboard.onAiDone(finishStream);
 
+window.betterboard.onAiDraw(({ requestId, drawing }) => {
+  const target = drawTarget;
+  if (!target || target.requestId !== requestId) return;
+  if (!board.frames.some((frame) => frame.id === target.frame) || !board.layers.some((layer) => layer.id === target.layer)) return;
+  const lines = drawingToLines(drawing, target.quad, target.worldPerPixel, {
+    color: target.color,
+    size: target.size,
+  });
+  const strokes = lines.map((line): Stroke => {
+    const stroke: Stroke = {
+      id: uid(),
+      seq: board.takeSeq(),
+      color: line.color,
+      size: line.size,
+      pen: false,
+      brush: 'pen',
+      seed: (Math.random() * 0xffffffff) >>> 0,
+      layer: target.layer,
+      frame: target.frame,
+      points: line.points,
+      bbox: emptyBBox(),
+    };
+    for (const point of stroke.points) growBBox(stroke.bbox, point.x, point.y, stroke.size / 2 + 2);
+    stroke.path = buildPath(stroke);
+    return stroke;
+  });
+  // A response may issue more than one tool call. Buffer all of them until the
+  // response finishes so the complete annotation is one undo operation.
+  target.strokes.push(...strokes);
+});
+
 window.betterboard.onAiError((message) => {
   streamEl?.remove();
   streamEl = null;
   setStreamingUi(false);
   thread.push({ role: 'assistant', text: message, error: true });
   renderThread();
-  void refreshKeyStatus();
+  drawTarget = null;
+  void refreshConnections();
 });
 
 $('ask-compose').addEventListener('submit', (e) => {
@@ -1206,18 +1411,76 @@ askInput.addEventListener('keydown', (e) => {
 });
 askForget.addEventListener('click', clearRegion);
 $('ask-new').addEventListener('click', newThread);
-$('ask-close').addEventListener('click', () => setAskOpen(false));
-$('ask-key-save').addEventListener('click', () => {
-  void (async () => {
-    const status = await window.betterboard.aiSetKey(askKeyInput.value);
-    askKeyInput.value = '';
-    keyIsSet = status.set;
-    askKeyBlock.classList.toggle('hidden', status.set);
-    askKeyNote.textContent = status.set ? `Saved key ends in ${status.hint}.` : 'That did not look like a key.';
-    askSend.disabled = !status.set;
-  })();
+$('ask-settings-toggle').addEventListener('click', () => {
+  if (!askSettings.classList.contains('hidden') && connectionUsable) {
+    settingsForced = false;
+    askSettings.classList.add('hidden');
+  } else {
+    settingsForced = true;
+    askSettings.classList.remove('hidden');
+    fillConnectionEditor(activeConnection());
+    askConnectionName.focus();
+  }
 });
-askKeyInput.addEventListener('keydown', (e) => e.stopPropagation());
+$('ask-close').addEventListener('click', () => {
+  settingsForced = false;
+  setAskOpen(false);
+});
+
+askConnectionSelect.addEventListener('change', () => {
+  void window.betterboard.aiSetActive(askConnectionSelect.value).then(applyConnectionState);
+});
+
+$('ask-connection-new').addEventListener('click', () => {
+  settingsForced = true;
+  askSettings.classList.remove('hidden');
+  fillConnectionEditor();
+  askConnectionName.focus();
+});
+
+askConnectionKind.addEventListener('change', () => {
+  const kind = askConnectionKind.value as AiConnectionKind;
+  askConnectionName.value = kind === 'embedded' ? 'This computer' : 'Yagami server';
+  syncConnectionMode(kind);
+  askConnectionNote.textContent = kind === 'embedded'
+    ? 'Uses the signed-in coding-agent CLIs installed on this computer.'
+    : 'A personal key is optional; use one if your server requires it.';
+  if (kind === 'embedded') void showLocalProviders();
+});
+
+$('ask-connection-save').addEventListener('click', () => {
+  void window.betterboard.aiSaveConnection({
+    id: editingConnectionId ?? undefined,
+    name: askConnectionName.value,
+    kind: askConnectionKind.value as AiConnectionKind,
+    model: askConnectionModel.value,
+    url: askConnectionUrl.value,
+    key: askConnectionKey.value,
+  }).then((state) => {
+    // Keep invalid form values in place so the user can correct one field
+    // instead of retyping the whole connection.
+    if (state.error) askConnectionNote.textContent = state.error;
+    else applyConnectionState(state);
+  });
+});
+
+askConnectionDelete.addEventListener('click', () => {
+  if (!editingConnectionId) return;
+  void window.betterboard.aiDeleteConnection(editingConnectionId).then(applyConnectionState);
+});
+
+$('ask-secret-clear').addEventListener('click', () => {
+  if (!editingConnectionId) return;
+  void window.betterboard.aiSaveConnection({
+    id: editingConnectionId,
+    kind: askConnectionKind.value as AiConnectionKind,
+    clearKey: true,
+  }).then(applyConnectionState);
+});
+
+for (const input of [askConnectionName, askConnectionKind, askConnectionModel, askConnectionUrl, askConnectionKey]) {
+  input.addEventListener('keydown', (event) => event.stopPropagation());
+}
 
 // ---- images ---------------------------------------------------------------
 
@@ -1593,8 +1856,7 @@ canvas.addEventListener('pointerdown', (e) => {
     drag = { kind: 'pan', startX: e.clientX, startY: e.clientY, camX: camera.x, camY: camera.y };
   } else if (eraseWanted) {
     drag = { kind: 'erase' };
-    eraserCursor = { x: e.offsetX, y: e.offsetY };
-    eraseAt(e);
+    beginErase(e);
     requestRender();
   } else if (tool === 'ask' && e.button === 0) {
     drag = { kind: 'region', x0: e.offsetX, y0: e.offsetY };
@@ -1702,7 +1964,10 @@ canvas.addEventListener('pointermove', (e) => {
       requestRender();
     }
   } else {
-    for (const ev of events) eraseAt(ev);
+    for (const ev of events) {
+      if (eraserMode === 'area') eraseAreaAt(ev);
+      else eraseAt(ev);
+    }
     eraserCursor = { x: e.offsetX, y: e.offsetY };
     requestRender();
   }
@@ -1714,7 +1979,15 @@ function endGesture(e: PointerEvent): void {
     addLivePoint(e);
     finishStroke();
   } else if (drag.kind === 'erase') {
-    board.removeStrokes(new Set(erasePending));
+    if (eraserMode === 'area') {
+      eraseAreaAt(e);
+      board.replaceStrokes([...areaEraseChanges.values()]);
+      areaEraseChanges.clear();
+      areaEraseLast = null;
+    } else {
+      eraseAt(e);
+      board.removeStrokes(new Set(erasePending));
+    }
     erasePending.clear();
   } else if (drag.kind === 'lasso') {
     addLassoPoint(e);
@@ -1741,6 +2014,7 @@ function endGesture(e: PointerEvent): void {
   }
   drag = null;
   activePointer = null;
+  if (tool !== 'eraser') eraserCursor = null;
   updateCursor();
   requestRender();
 }
@@ -1778,7 +2052,7 @@ canvas.addEventListener(
 
 window.addEventListener('keydown', (e) => {
   const target = e.target as HTMLElement;
-  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
   if (e.key === ' ') {
     if (!spaceHeld) {
       spaceHeld = true;
@@ -1888,7 +2162,7 @@ window.addEventListener('blur', () => {
 // ---- menu / file actions --------------------------------------------------
 
 async function newBoard(): Promise<void> {
-  if (board.strokes.length > 0) {
+  if (board.strokes.length > 0 || board.images.length > 0) {
     const ok = await window.betterboard.confirm(
       'Start a new board?',
       'The current board will be cleared. Save it first if you want to keep it.'
@@ -1970,7 +2244,7 @@ window.betterboard.onMenu((action) => {
       break;
     case 'clear':
       void (async () => {
-        if (board.frameStrokes().length === 0) return;
+        if (board.frameStrokes().length === 0 && board.imagesOn().length === 0) return;
         if (await window.betterboard.confirm('Clear this frame?', 'You can undo this.')) {
           clearSelection();
           board.clear();
@@ -1998,10 +2272,11 @@ window.betterboard.onMenu((action) => {
     case 'toggle-theme':
       toggleTheme();
       break;
-    case 'ai-key':
+    case 'ai-connections':
+      settingsForced = true;
       setAskOpen(true);
-      askKeyBlock.classList.remove('hidden');
-      askKeyInput.focus();
+      askSettings.classList.remove('hidden');
+      askConnectionName.focus();
       break;
     case 'ask-region':
       setTool('ask');
@@ -2059,6 +2334,9 @@ window.betterboard.onMenu((action) => {
 // ---- toolbar wiring ---------------------------------------------------------
 
 toolButtons.eraser.addEventListener('click', () => setTool('eraser'));
+for (const button of eraserModeButtons) {
+  button.addEventListener('click', () => setEraserMode(button.dataset.eraserMode as EraserMode));
+}
 for (const id of BRUSH_ORDER) {
   brushButtons[id].addEventListener('click', () => setBrush(id));
 }
@@ -2107,6 +2385,7 @@ async function main(): Promise<void> {
   document.body.classList.toggle('mac', window.betterboard.platform === 'darwin');
   loadPrefs();
   applyTheme();
+  setEraserMode(eraserMode);
   setTool(tool);
   syncBrushButtons();
   setColor(color);

@@ -1,10 +1,39 @@
 const { app, BrowserWindow, Menu, clipboard, ipcMain, dialog } = require('electron');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 app.setName('BetterBoard');
 
 const isMac = process.platform === 'darwin';
+
+// Finder-launched apps inherit a minimal PATH, so Yagami would miss binaries
+// that work normally in the user's terminal. Recover the login-shell PATH and
+// append the common user install directories before the engine is constructed.
+function fixExecutablePath() {
+  if (isMac) {
+    try {
+      const shell = process.env.SHELL || '/bin/zsh';
+      const output = execFileSync(shell, ['-ilc', 'printf "__BETTERBOARD__%s__BETTERBOARD__" "$PATH"'], {
+        encoding: 'utf8',
+        timeout: 5000,
+      });
+      const match = /__BETTERBOARD__(.*)__BETTERBOARD__/s.exec(output);
+      if (match?.[1]) process.env.PATH = match[1];
+    } catch {}
+  }
+  const extra = [
+    path.join(os.homedir(), '.local', 'bin'),
+    path.join(os.homedir(), '.bun', 'bin'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+  ];
+  const current = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  process.env.PATH = [...current, ...extra.filter((dir) => !current.includes(dir))].join(path.delimiter);
+}
+
+fixExecutablePath();
 
 const userData = () => app.getPath('userData');
 const autosavePath = () => path.join(userData(), 'autosave.json');
@@ -23,6 +52,7 @@ function readJSON(file) {
 
 function createWindow() {
   const saved = readJSON(windowStatePath());
+  const appRoot = app.getAppPath();
   win = new BrowserWindow({
     width: saved?.width ?? 1440,
     height: saved?.height ?? 900,
@@ -33,12 +63,12 @@ function createWindow() {
     ...(isMac ? { titleBarStyle: 'hiddenInset' } : {}),
     backgroundColor: '#15161a',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(appRoot, 'src', 'main', 'preload.js'),
       contextIsolation: true,
     },
   });
 
-  win.loadFile(path.join(__dirname, '..', '..', 'dist', 'index.html'));
+  win.loadFile(path.join(appRoot, 'dist', 'index.html'));
 
   win.on('close', () => {
     try {
@@ -83,8 +113,8 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Insert Image…', accelerator: 'CmdOrCtrl+Shift+I', click: () => send('insert-image') },
         { type: 'separator' },
-        { label: 'Ask Claude About a Region', accelerator: 'CmdOrCtrl+Alt+A', click: () => send('ask-region') },
-        { label: 'Claude API Key…', click: () => send('ai-key') },
+        { label: 'Ask / Draw About a Region', accelerator: 'CmdOrCtrl+Alt+A', click: () => send('ask-region') },
+        { label: 'Yagami Connections…', click: () => send('ai-connections') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
@@ -94,7 +124,6 @@ function buildMenu() {
       submenu: [
         { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => send('undo') },
         { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', click: () => send('redo') },
-        { type: 'separator' },
         { type: 'separator' },
         // Chromium only runs its own paste for editable targets, so pressing
         // Cmd+V over the canvas fires nothing at all. This routes it to the
@@ -116,7 +145,7 @@ function buildMenu() {
         { label: 'Play / Pause', accelerator: 'CmdOrCtrl+Return', click: () => send('play') },
         { type: 'separator' },
         { label: 'New Frame', accelerator: 'CmdOrCtrl+Alt+F', click: () => send('frame-new') },
-        { label: 'Duplicate Frame', accelerator: 'CmdOrCtrl+Alt+D', click: () => send('frame-duplicate') },
+        { label: 'Duplicate Frame', accelerator: 'CmdOrCtrl+D', click: () => send('frame-duplicate') },
         { label: 'Delete Frame', click: () => send('frame-delete') },
         { type: 'separator' },
         { label: 'Previous Frame', accelerator: 'CmdOrCtrl+Alt+Left', click: () => send('frame-prev') },
@@ -157,19 +186,24 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-// ---- Claude ---------------------------------------------------------------
+// ---- Yagami connections ---------------------------------------------------
 // The request lives in the main process rather than the renderer: the
 // renderer's CSP allows no external origins, and the key stays out of page
-// context entirely. It is read from disk per request and never logged, echoed
-// back, or sent anywhere but the API.
+// context entirely. Secrets are only reported back as a boolean and last-four
+// hint; the renderer never receives a Yagami personal API key.
 
-const { askClaude } = require('./claude');
+const crypto = require('crypto');
+const { askAI, endpointFor, localProviderState } = require('./ai');
 
-// Overridable so the request path can be pointed at a local server under test.
-const API_URL = process.env.BETTERBOARD_API_URL || undefined;
-
-function readKey() {
-  return readJSON(settingsPath())?.anthropicKey ?? '';
+function defaultConnection() {
+  return {
+    id: 'embedded',
+    name: 'This computer',
+    kind: 'embedded',
+    model: '',
+    url: '',
+    key: '',
+  };
 }
 
 function writeSettings(patch) {
@@ -180,41 +214,133 @@ function writeSettings(patch) {
   } catch {}
 }
 
+function readConnectionState() {
+  const settings = readJSON(settingsPath()) ?? {};
+  const source = Array.isArray(settings.aiConnections) && settings.aiConnections.length
+    ? settings.aiConnections
+    : [defaultConnection()];
+  const connections = [];
+  for (const raw of source) {
+    const id = String(raw?.id ?? '');
+    // The short-lived Yagami-only connection format represented remote
+    // servers as `yagami`; preserve those settings during this migration.
+    const kind = raw?.kind === 'yagami' ? 'remote' : raw?.kind;
+    if ((kind !== 'embedded' && kind !== 'remote') || !id || connections.some((connection) => connection.id === id)) continue;
+    connections.push({
+      id,
+      name: String(raw.name ?? (kind === 'embedded' ? 'This computer' : 'Yagami server')).trim().slice(0, 40)
+        || (kind === 'embedded' ? 'This computer' : 'Yagami server'),
+      kind,
+      model: String(raw.model ?? '').trim().slice(0, 120),
+      url: kind === 'remote' ? String(raw.url ?? '').trim().slice(0, 2048) : '',
+      key: kind === 'remote' ? String(raw.key ?? '') : '',
+    });
+  }
+  if (connections.length === 0) connections.push(defaultConnection());
+  const active = connections.some((connection) => connection.id === settings.activeAiConnection)
+    ? settings.activeAiConnection
+    : connections[0].id;
+  return { connections, active };
+}
+
+function publicConnectionState() {
+  const { connections, active } = readConnectionState();
+  return {
+    active,
+    connections: connections.map(({ key, ...connection }) => ({
+      ...connection,
+      keySet: key.length > 0,
+      keyHint: key ? key.slice(-4) : '',
+    })),
+  };
+}
+
+function saveConnections(connections, active) {
+  writeSettings({ aiConnections: connections, activeAiConnection: active });
+}
+
+function saveConnection(input) {
+  const state = readConnectionState();
+  const existing = state.connections.find((connection) => connection.id === input?.id);
+  const kind = input?.kind === 'remote' || input?.kind === 'embedded'
+    ? input.kind
+    : existing?.kind ?? 'embedded';
+  const fallbackName = kind === 'embedded' ? 'This computer' : 'Yagami server';
+  const connection = {
+    id: existing?.id ?? crypto.randomUUID(),
+    name: String(input?.name ?? existing?.name ?? fallbackName).trim().slice(0, 40) || fallbackName,
+    kind,
+    model: String(input?.model ?? existing?.model ?? '').trim().slice(0, 120),
+    url: kind === 'remote'
+      ? String(input?.url ?? (existing?.kind === 'remote' ? existing.url : '') ?? '').trim().slice(0, 2048)
+      : '',
+    key: kind === 'remote' && !input?.clearKey
+      ? (String(input?.key ?? '').trim() || (existing?.kind === 'remote' ? existing.key : '') || '')
+      : '',
+  };
+  if (kind === 'remote' && !connection.url) throw new Error('A remote Yagami connection needs a URL.');
+  if (kind === 'remote') endpointFor(connection); // validates URL and fills its API path
+  const at = existing ? state.connections.indexOf(existing) : state.connections.length;
+  state.connections.splice(at, existing ? 1 : 0, connection);
+  saveConnections(state.connections, connection.id);
+  return publicConnectionState();
+}
+
 let inFlight = null;
 
 function aiSend(channel, payload) {
   win?.webContents.send(channel, payload);
 }
 
-async function runAsk({ messages, model }) {
+async function runAsk({ connectionId, messages, requestId }) {
   inFlight?.abort();
   const controller = new AbortController();
   inFlight = controller;
-  await askClaude({
-    url: API_URL,
-    key: readKey(),
-    model,
+  const state = readConnectionState();
+  const connection = state.connections.find((item) => item.id === connectionId)
+    ?? state.connections.find((item) => item.id === state.active)
+    ?? state.connections[0];
+  const currentSend = (channel, payload) => {
+    if (inFlight === controller) aiSend(channel, payload);
+  };
+  await askAI({
+    connection,
     messages,
     signal: controller.signal,
-    onDelta: (text) => aiSend('ai:delta', text),
-    onError: (message) => aiSend('ai:error', message),
-    onDone: () => aiSend('ai:done'),
+    onDelta: (text) => currentSend('ai:delta', text),
+    onDraw: (drawing) => currentSend('ai:draw', { requestId, drawing }),
+    onError: (message) => currentSend('ai:error', message),
+    onDone: () => currentSend('ai:done'),
   });
   if (inFlight === controller) inFlight = null;
 }
 
 function registerIpc() {
-  // Only ever reports whether a key exists and its last four characters, so the
-  // secret itself never travels back into the renderer.
-  ipcMain.handle('ai:key-status', () => {
-    const key = readKey();
-    return { set: key.length > 0, hint: key ? key.slice(-4) : '' };
+  ipcMain.handle('ai:connections', () => publicConnectionState());
+  ipcMain.handle('ai:local-providers', () => localProviderState());
+  ipcMain.handle('ai:save-connection', (_e, input) => {
+    try {
+      return { ...saveConnection(input), error: '' };
+    } catch (error) {
+      return { ...publicConnectionState(), error: error?.message ?? 'Could not save that connection.' };
+    }
   });
-
-  ipcMain.handle('ai:set-key', (_e, key) => {
-    writeSettings({ anthropicKey: typeof key === 'string' ? key.trim() : '' });
-    const stored = readKey();
-    return { set: stored.length > 0, hint: stored ? stored.slice(-4) : '' };
+  ipcMain.handle('ai:set-active', (_e, id) => {
+    const state = readConnectionState();
+    if (state.connections.some((connection) => connection.id === id)) {
+      saveConnections(state.connections, id);
+    }
+    return publicConnectionState();
+  });
+  ipcMain.handle('ai:delete-connection', (_e, id) => {
+    const state = readConnectionState();
+    const connections = state.connections.filter((connection) => connection.id !== id);
+    if (connections.length === 0) connections.push(defaultConnection());
+    const active = connections.some((connection) => connection.id === state.active)
+      ? state.active
+      : connections[0].id;
+    saveConnections(connections, active);
+    return publicConnectionState();
   });
 
   ipcMain.handle('ai:ask', (_e, payload) => {

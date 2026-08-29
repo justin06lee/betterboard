@@ -1,15 +1,28 @@
-interface AiKeyStatus {
-  set: boolean;
-  hint: string; // last four characters, for confirming which key is stored
+export type AiConnectionKind = 'embedded' | 'remote';
+
+export interface AiConnection {
+  id: string;
+  name: string;
+  kind: AiConnectionKind;
+  model: string;
+  url: string;
+  keySet: boolean;
+  keyHint: string;
+}
+
+export interface AiConnectionState {
+  active: string;
+  connections: AiConnection[];
+  error?: string;
 }
 
 interface AiAsk {
-  model: string;
+  requestId: string;
+  connectionId: string;
   messages: {
     role: 'user' | 'assistant';
-    content:
-      | string
-      | ({ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } })[];
+    text: string;
+    image?: string;
   }[];
 }
 
@@ -26,13 +39,17 @@ interface BetterboardAPI {
   confirm(message: string, detail?: string): Promise<boolean>;
   onMenu(cb: (action: string) => void): void;
 
-  aiKeyStatus(): Promise<AiKeyStatus>;
-  aiSetKey(key: string): Promise<AiKeyStatus>;
+  aiConnections(): Promise<AiConnectionState>;
+  aiLocalProviders(): Promise<{ providers: string[]; error: string }>;
+  aiSaveConnection(connection: Partial<AiConnection> & { key?: string; clearKey?: boolean }): Promise<AiConnectionState>;
+  aiSetActive(id: string): Promise<AiConnectionState>;
+  aiDeleteConnection(id: string): Promise<AiConnectionState>;
   aiAsk(payload: AiAsk): Promise<void>;
   aiCancel(): Promise<void>;
   onAiDelta(cb: (text: string) => void): void;
   onAiDone(cb: () => void): void;
   onAiError(cb: (message: string) => void): void;
+  onAiDraw(cb: (payload: { requestId: string; drawing: unknown }) => void): void;
 }
 
 declare global {

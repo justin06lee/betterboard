@@ -13,11 +13,15 @@ contextBridge.exposeInMainWorld('betterboard', {
   confirm: (message, detail) => ipcRenderer.invoke('ui:confirm', message, detail),
   onMenu: (cb) => ipcRenderer.on('menu', (_e, action) => cb(action)),
 
-  aiKeyStatus: () => ipcRenderer.invoke('ai:key-status'),
-  aiSetKey: (key) => ipcRenderer.invoke('ai:set-key', key),
+  aiConnections: () => ipcRenderer.invoke('ai:connections'),
+  aiLocalProviders: () => ipcRenderer.invoke('ai:local-providers'),
+  aiSaveConnection: (connection) => ipcRenderer.invoke('ai:save-connection', connection),
+  aiSetActive: (id) => ipcRenderer.invoke('ai:set-active', id),
+  aiDeleteConnection: (id) => ipcRenderer.invoke('ai:delete-connection', id),
   aiAsk: (payload) => ipcRenderer.invoke('ai:ask', payload),
   aiCancel: () => ipcRenderer.invoke('ai:cancel'),
   onAiDelta: (cb) => ipcRenderer.on('ai:delta', (_e, text) => cb(text)),
   onAiDone: (cb) => ipcRenderer.on('ai:done', () => cb()),
   onAiError: (cb) => ipcRenderer.on('ai:error', (_e, message) => cb(message)),
+  onAiDraw: (cb) => ipcRenderer.on('ai:draw', (_e, payload) => cb(payload)),
 });

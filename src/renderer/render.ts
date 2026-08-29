@@ -77,6 +77,23 @@ function scratchContext(width: number, height: number, transform: Matrix): Canva
   return sctx;
 }
 
+// Onion frames need one canvas for the flattened frame and another for a
+// translucent layer within that frame. Reusing the same canvas would clear the
+// layers that were already painted.
+let layerScratch: HTMLCanvasElement | null = null;
+function layerScratchContext(width: number, height: number, transform: Matrix): CanvasRenderingContext2D {
+  if (!layerScratch) layerScratch = document.createElement('canvas');
+  if (layerScratch.width !== width || layerScratch.height !== height) {
+    layerScratch.width = width;
+    layerScratch.height = height;
+  }
+  const sctx = layerScratch.getContext('2d')!;
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.clearRect(0, 0, width, height);
+  sctx.setTransform(...transform);
+  return sctx;
+}
+
 // Paints one layer's strokes into a context already carrying the world
 // transform. Strokes being dragged are lifted into a translated pass so a move
 // costs one extra transform rather than a rebuild — but they stay inside their
@@ -266,19 +283,33 @@ export function render(
   for (const ghost of opts.ghosts) {
     if (ghost.strokes.length === 0 && ghost.images.length === 0) continue;
     const gctx = scratchContext(canvas.width, canvas.height, world);
-    for (const im of ghost.images) {
-      if (!im.el || !bboxIntersects(imageBBox(im), view)) continue;
-      gctx.drawImage(im.el, im.x, im.y, im.width, im.height);
+    const ghostBuckets = bucketByLayer(ghost.strokes, ghost.images, opts.layers);
+    for (const layer of opts.layers) {
+      if (!layer.visible || layer.opacity === 0) continue;
+      const bucket = ghostBuckets.get(layer.id)!;
+      if (bucket.strokes.length === 0 && bucket.images.length === 0) continue;
+      if (layer.opacity >= 1) {
+        paintLayer(gctx, bucket, view, null, null, null);
+        continue;
+      }
+      const lctx = layerScratchContext(canvas.width, canvas.height, world);
+      paintLayer(lctx, bucket, view, null, null, null);
+      gctx.save();
+      gctx.setTransform(1, 0, 0, 1, 0, 0);
+      gctx.globalAlpha = layer.opacity;
+      gctx.drawImage(layerScratch!, 0, 0);
+      gctx.restore();
     }
-    for (const s of ghost.strokes) {
-      if (!s.path || !bboxIntersects(s.bbox, view)) continue;
-      // A tinted ghost is a flat silhouette; an untinted one should look like
-      // the frame it came from, brush opacity and all.
-      gctx.fillStyle = ghost.tint ?? s.color;
-      gctx.globalAlpha = ghost.tint ? 1 : (BRUSHES[s.brush]?.alpha ?? 1);
-      gctx.fill(s.path);
+    if (ghost.tint) {
+      // Colour the fully composited frame in one pass, including pictures. The
+      // source-in operation keeps transparency while replacing visible pixels.
+      gctx.save();
+      gctx.setTransform(1, 0, 0, 1, 0, 0);
+      gctx.globalCompositeOperation = 'source-in';
+      gctx.fillStyle = ghost.tint;
+      gctx.fillRect(0, 0, canvas.width, canvas.height);
+      gctx.restore();
     }
-    gctx.globalAlpha = 1;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = ghost.alpha;

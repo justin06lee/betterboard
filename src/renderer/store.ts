@@ -4,7 +4,10 @@ import { MAX_FPS, MIN_FPS, defaultOnion, emptyBBox, growBBox, isBrush, newFrame,
 
 export type Op =
   | { type: 'add'; stroke: Stroke }
+  | { type: 'add-many'; strokes: Stroke[] }
   | { type: 'remove'; removed: { index: number; stroke: Stroke }[] }
+  | { type: 'replace'; changes: StrokeReplacement[] }
+  | { type: 'clear'; strokes: { index: number; stroke: Stroke }[]; images: { index: number; image: BoardImage }[] }
   | { type: 'scale'; factor: number }
   | { type: 'move'; ids: string[]; images: string[]; dx: number; dy: number }
   | { type: 'image-add'; image: BoardImage }
@@ -22,6 +25,12 @@ export interface Rect {
   y: number;
   width: number;
   height: number;
+}
+
+export interface StrokeReplacement {
+  index: number;
+  before: Stroke;
+  after: Stroke[];
 }
 
 const MAX_UNDO = 500;
@@ -64,6 +73,12 @@ export class Board {
   addStroke(stroke: Stroke): void {
     this.strokes.push(stroke);
     this.push({ type: 'add', stroke });
+  }
+
+  addStrokes(strokes: Stroke[]): void {
+    if (strokes.length === 0) return;
+    this.strokes.push(...strokes);
+    this.push({ type: 'add-many', strokes });
   }
 
   // ---- images -------------------------------------------------------------
@@ -229,23 +244,35 @@ export class Board {
     const added: Stroke[] = [];
     const addedImages: BoardImage[] = [];
     if (duplicate) {
-      for (const s of this.frameStrokes()) {
-        const copy: Stroke = {
-          ...s,
-          id: uid(),
-          frame: frame.id,
-          points: s.points.map((pt) => ({ ...pt })),
-          bbox: { ...s.bbox },
-        };
-        copy.path = buildPath(copy);
-        added.push(copy);
+      const contents = [
+        ...this.frameStrokes().map((stroke) => ({ kind: 'stroke' as const, seq: stroke.seq, stroke })),
+        ...this.imagesOn().map((image) => ({ kind: 'image' as const, seq: image.seq, image })),
+      ].sort((a, b) => a.seq - b.seq);
+      for (const item of contents) {
+        if (item.kind === 'stroke') {
+          const copy: Stroke = {
+            ...item.stroke,
+            id: uid(),
+            seq: this.takeSeq(),
+            frame: frame.id,
+            points: item.stroke.points.map((pt) => ({ ...pt })),
+            bbox: { ...item.stroke.bbox },
+          };
+          copy.path = buildPath(copy);
+          added.push(copy);
+        } else {
+          const copy: BoardImage = {
+            ...item.image,
+            id: uid(),
+            seq: this.takeSeq(),
+            frame: frame.id,
+            el: item.image.el,
+          };
+          addedImages.push(copy);
+        }
       }
       this.strokes.push(...added);
-      for (const im of this.imagesOn()) {
-        const copy: BoardImage = { ...im, id: uid(), seq: this.takeSeq(), frame: frame.id, el: im.el };
-        this.images.push(copy);
-        addedImages.push(copy);
-      }
+      this.images.push(...addedImages);
     }
     this.activeFrame = frame.id;
     this.push({ type: 'frame-add', index, frame, added, addedImages });
@@ -336,11 +363,49 @@ export class Board {
     this.push({ type: 'remove', removed });
   }
 
+  // Replaces one or more strokes with clipped fragments. Keeping this as one
+  // operation is what makes an entire area-eraser gesture undo in one step.
+  replaceStrokes(changes: StrokeReplacement[]): void {
+    if (changes.length === 0) return;
+    const sorted = [...changes].sort((a, b) => a.index - b.index);
+    this.applyStrokeReplacements(sorted, true);
+    this.push({ type: 'replace', changes: sorted });
+  }
+
+  private applyStrokeReplacements(changes: StrokeReplacement[], forward: boolean): void {
+    let offset = 0;
+    const positioned = changes.map((change) => {
+      const positionedChange = { change, at: change.index + offset };
+      offset += change.after.length - 1;
+      return positionedChange;
+    });
+    if (forward) {
+      for (const { change, at } of positioned) {
+        this.strokes.splice(at, 1, ...change.after);
+      }
+    } else {
+      for (let i = positioned.length - 1; i >= 0; i--) {
+        const { change, at } = positioned[i];
+        this.strokes.splice(at, change.after.length, change.before);
+      }
+    }
+  }
+
   // Clears the current frame only — wiping every frame at once is not something
   // a single menu item should be able to do to an animation.
   clear(): void {
-    this.removeStrokes(new Set(this.frameStrokes().map((s) => s.id)));
-    this.removeImages(new Set(this.imagesOn().map((im) => im.id)));
+    const strokes = this.strokes
+      .map((stroke, index) => ({ index, stroke }))
+      .filter(({ stroke }) => stroke.frame === this.activeFrame);
+    const images = this.images
+      .map((image, index) => ({ index, image }))
+      .filter(({ image }) => image.frame === this.activeFrame);
+    if (strokes.length === 0 && images.length === 0) return;
+    const strokeIds = new Set(strokes.map(({ stroke }) => stroke.id));
+    const imageIds = new Set(images.map(({ image }) => image.id));
+    this.strokes = this.strokes.filter((s) => !strokeIds.has(s.id));
+    this.images = this.images.filter((im) => !imageIds.has(im.id));
+    this.push({ type: 'clear', strokes, images });
   }
 
   // Rescales the whole world around the origin, e.g. to rebase the current
@@ -424,9 +489,21 @@ export class Board {
     if (!op) return undefined;
     if (op.type === 'add') {
       this.strokes = this.strokes.filter((s) => s.id !== op.stroke.id);
+    } else if (op.type === 'add-many') {
+      const ids = new Set(op.strokes.map((stroke) => stroke.id));
+      this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
     } else if (op.type === 'remove') {
       for (const { index, stroke } of op.removed) {
         this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
+      }
+    } else if (op.type === 'replace') {
+      this.applyStrokeReplacements(op.changes, false);
+    } else if (op.type === 'clear') {
+      for (const { index, stroke } of op.strokes) {
+        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
+      }
+      for (const { index, image } of op.images) {
+        this.images.splice(Math.min(index, this.images.length), 0, image);
       }
     } else if (op.type === 'move') {
       this.applyMove(op.ids, op.images, -op.dx, -op.dy);
@@ -483,9 +560,18 @@ export class Board {
     if (!op) return undefined;
     if (op.type === 'add') {
       this.strokes.push(op.stroke);
+    } else if (op.type === 'add-many') {
+      this.strokes.push(...op.strokes);
     } else if (op.type === 'remove') {
       const ids = new Set(op.removed.map((r) => r.stroke.id));
       this.strokes = this.strokes.filter((s) => !ids.has(s.id));
+    } else if (op.type === 'replace') {
+      this.applyStrokeReplacements(op.changes, true);
+    } else if (op.type === 'clear') {
+      const strokeIds = new Set(op.strokes.map(({ stroke }) => stroke.id));
+      const imageIds = new Set(op.images.map(({ image }) => image.id));
+      this.strokes = this.strokes.filter((s) => !strokeIds.has(s.id));
+      this.images = this.images.filter((im) => !imageIds.has(im.id));
     } else if (op.type === 'move') {
       this.applyMove(op.ids, op.images, op.dx, op.dy);
     } else if (op.type === 'image-add') {

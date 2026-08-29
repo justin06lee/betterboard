@@ -11,8 +11,14 @@ if (!root) {
   process.exit(2);
 }
 
-const entry = path.join(root, 'src', 'main', 'main.js');
 const problems = [];
+let entry = '';
+try {
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  entry = path.join(root, pkg.main);
+} catch {
+  problems.push('package.json is missing or invalid');
+}
 
 function resolve(from, spec) {
   const base = path.resolve(path.dirname(from), spec);
@@ -36,8 +42,8 @@ function walk(file) {
   }
 }
 
-if (!fs.existsSync(entry)) {
-  problems.push('src/main/main.js is missing from the bundle');
+if (!entry || !fs.existsSync(entry)) {
+  problems.push('the package main entry is missing from the bundle');
 } else {
   walk(entry);
 }

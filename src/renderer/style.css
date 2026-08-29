@@ -125,6 +125,40 @@ body.mac .topbar {
   pointer-events: none;
 }
 
+.eraser-modes {
+  display: flex;
+  height: 26px;
+  padding: 2px;
+  margin-left: 2px;
+  border: 1px solid var(--bar-border);
+  border-radius: 7px;
+  background: var(--bg);
+}
+
+.eraser-modes.hidden {
+  display: none;
+}
+
+.eraser-modes button {
+  padding: 0 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.eraser-modes button:hover {
+  color: var(--fg);
+}
+
+.eraser-modes button.active {
+  background: var(--active);
+  color: var(--accent);
+}
+
 .swatch {
   width: 20px;
   height: 20px;
@@ -436,7 +470,8 @@ body.timeline-open .ask {
   color: var(--fg-dim);
 }
 
-#ask-model {
+#ask-connection {
+  max-width: 112px;
   flex: none;
   padding: 3px 4px;
   border: 1px solid var(--bar-border);
@@ -483,7 +518,7 @@ body.timeline-open .ask {
   color: var(--fg);
 }
 
-.ask-msg.claude {
+.ask-msg.assistant {
   color: var(--fg);
 }
 
@@ -583,25 +618,35 @@ body.timeline-open .ask {
   display: none;
 }
 
-.ask-key {
+.ask-settings {
   padding: 10px 12px;
   border-bottom: 1px solid var(--bar-border);
   display: flex;
   flex-direction: column;
   gap: 7px;
+  max-height: 58vh;
+  overflow-y: auto;
 }
 
-.ask-key.hidden {
+.ask-settings.hidden {
   display: none;
 }
 
-.ask-key p {
+.ask-settings p,
+.ask-settings label > span {
   font-size: 11.5px;
   line-height: 1.5;
   color: var(--fg-dim);
 }
 
-.ask-key input {
+.ask-settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ask-settings input,
+.ask-settings select {
   width: 100%;
   padding: 6px 8px;
   border: 1px solid var(--bar-border);
@@ -612,7 +657,18 @@ body.timeline-open .ask {
   font-size: 12px;
 }
 
-.ask-key-note:empty {
+.ask-settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.ask-settings-actions:first-child {
+  justify-content: space-between;
+}
+
+.ask-connection-note:empty {
   display: none;
 }
 

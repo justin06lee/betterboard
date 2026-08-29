@@ -4,18 +4,24 @@
   "version": "0.4.1",
   "private": true,
   "description": "An infinite whiteboard for pen displays.",
-  "main": "src/main/main.js",
+  "main": "dist-main/main.mjs",
   "scripts": {
     "check": "tsc --noEmit",
-    "build": "bun run check && bun build src/renderer/renderer.ts --outdir=dist --format=iife --minify && cp src/renderer/index.html src/renderer/style.css dist/",
+    "test": "bun test ./src",
+    "build:renderer": "bun build src/renderer/renderer.ts --outdir=dist --format=iife --minify && cp src/renderer/index.html src/renderer/style.css dist/",
+    "build:main": "node scripts/build-main.js",
+    "build": "bun run check && bun run test && bun run build:renderer && bun run build:main",
     "dev": "bun run build && bunx electron .",
     "start": "bunx electron ."
   },
   "dependencies": {
+    "@justin06lee/yagami": "../yagami",
     "perfect-freehand": "^1.2.2"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.0",
     "electron": "^43.4.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.6.0"
   },
   "trustedDependencies": [

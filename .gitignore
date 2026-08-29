@@ -3,6 +3,7 @@ node_modules/
 
 # build outputs
 dist/
+dist-main/
 out/
 
 # env / secrets

@@ -11,19 +11,19 @@
 
 ---
 
-betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designed around drawing tablets like the Huion Kamvas Pro. Strokes are stored as vectors — pressure-weighted centerlines rendered with [perfect-freehand](https://github.com/steveruizok/perfect-freehand) — so the canvas is truly infinite, zooming is lossless, and erasing works per stroke.
+betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designed around drawing tablets like the Huion Kamvas Pro. Strokes are stored as vectors — pressure-weighted centerlines rendered with [perfect-freehand](https://github.com/steveruizok/perfect-freehand) — so the canvas is truly infinite, zooming is lossless, and erasing can remove whole strokes or only the ink under the eraser.
 
 ## Features
 
 - **Four brushes** — **pen** (pressure-tapered ink), **pixel** (snaps to a shared world grid, so separate strokes and separate sessions line up — real pixel art), **marker** (flat chisel tip, translucent, builds up where strokes cross) and **paint** (a dry bristle brush with a solid body and frayed edges). Stroke width follows stylus pressure via Chromium pointer events; mouse strokes fall back to velocity-simulated pressure
 - **Infinite canvas** — pan, zoom, and rotate freely, with an adaptive dot grid that follows the view
 - **Stylus-native gestures** — the pen's eraser end erases, the barrel button pans, touch pans
-- **Stroke eraser** — removes whole strokes, one undo step per gesture
+- **Two eraser modes** — remove whole strokes, or remove only the ink swept by the eraser circle; either mode is one undo step per gesture
 - **Lasso select** — loop your pen around anything to select it, then drag the marching-ants outline to move it; `⌫` deletes the selection, `Esc` drops it
 - **Layers** — add, delete, rename, reorder by dragging, hide, and dim. Opacity composites the finished layer rather than each stroke, so overlaps never show seams — drop a sketch to 30% and ink over it cleanly. Drawing, erasing and selecting stay on the active layer, so what's underneath is safe
 - **Animation** — a timeline of frames, each with the full layer stack. Add, duplicate, delete and drag frames into order, set the frame rate, and play the loop back. Onion skinning ghosts the frames either side, tinted red behind and teal ahead, with adjustable reach and strength
 - **Images** — paste from the clipboard, drop files onto the board, or insert from disk. They land on the active layer and frame, interleaved with your ink in the order you made things, so you can draw over a reference or paste a screenshot on top of notes. Drag to move, drag a corner to scale, `⌫` to delete
-- **Ask Claude** — box any part of the board and ask about it. The crop is re-rendered clean (no grid, no onion ghosts, no selection outlines) and sent with your question; the reply streams into a narrow side panel you can keep asking follow-ups in
+- **Ask / Draw through Yagami** — box any part of the board to discuss it or ask the model to circle, connect, annotate, and sketch directly into the selected region. Model drawings are ordinary vector strokes with one-step undo. Use the signed-in coding-agent binaries on this computer directly, or connect to a remote personal Yagami server
 - **Normalize zoom** — one press rebases the current view as the new 100%, restoring the full zoom range without moving a pixel; when you hit the zoom-out floor, the button pulses to offer it
 - **Undo / redo**, dark & light board themes, autosave and session restore
 - **Save / open** boards as JSON, **export** the current frame's visible layers as PNG
@@ -56,7 +56,7 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Action | Input |
 |---|---|
 | Draw | Pen or left mouse drag |
-| Erase | `E`, the stylus eraser end, or eraser tool |
+| Erase | `E`, the stylus eraser end, or eraser tool; choose **Stroke** or **Area** beside the active eraser |
 | Select an area | `S`, then loop the pen around it (tap a stroke to select just that one) |
 | Move a selection | Drag from inside the outline |
 | Delete / drop a selection | `⌫` / `Esc` |
@@ -67,14 +67,14 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Rotate | hold `R` and drag the dial — snaps near 45° steps; double-click the dial to reset, `⌘1` also squares the view |
 | Brushes | `1` pen · `2` pixel · `3` marker · `4` paint |
 | Tools | `B`/`P` draw · `E` toggles eraser/pen · `S` toggles lasso/pen · `H` hand |
-| Ask Claude about a region | `A`, then drag a box (or `⌥⌘A`) |
+| Ask or draw with AI in a region | `A`, then drag a box (or `⌥⌘A`) |
 | Send · newline · new thread | `Enter` · `⇧Enter` · `+` in the panel |
 | Paste / insert an image | `⌘V` (Edit ▸ Paste), drop a file on the board, or `⇧⌘I` |
 | Move / scale / delete an image | Drag it · drag a corner grip · `⌫` |
 | Timeline | `T` or `⌘T` |
 | Play / pause | `Enter` (or `⌘↩`) |
 | Previous / next frame | `←` / `→` |
-| New / duplicate / delete frame | `⌥⌘F` / `⌥⌘D`, or `+` ⧉ 🗑 in the timeline |
+| New / duplicate / delete frame | `⌥⌘F` / `⌘D`, or `+` ⧉ 🗑 in the timeline |
 | Reorder frames | Drag a frame cell |
 | Frame rate · onion skin | The fps field · the ◐ button (`⌥⌘O`), then its sliders |
 | Layers panel | `L` or `⌘L` |
@@ -87,16 +87,23 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Dot grid · board theme | `⌘G` · `⇧⌘L` |
 | Clear frame | `⌘⌫` |
 
-## Asking Claude
+## Asking and drawing with AI
 
-The Ask tool boxes a region, re-renders just that area as a PNG, and sends it with your question to the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages). Replies stream into the side panel, and follow-ups keep the thread — the image is sent once, not with every turn.
+The Ask tool boxes a region, re-renders just that area as a PNG, and sends it with your question through [Yagami](https://github.com/justin06lee/yagami). Replies appear in the side panel. Ask the model to draw, circle, underline, connect, or annotate and it can add bounded vector commands to the current layer and frame. Those strokes remain editable board content and undo together in one step.
 
-It is entirely opt-in and off until you add a key: **File → Claude API Key…**, or the prompt in the panel. Worth knowing before you turn it on:
+Open **File → Yagami Connections…** and choose one of two modes:
 
-- The key is written to `settings.json` in the app's user-data directory with `0600` permissions. It never enters the renderer — requests are made from the main process — and only its last four characters are ever read back for display.
-- Nothing leaves your machine unless you press Ask. What goes is exactly one thing: the cropped image and the messages in that thread. No other frames, layers, or board contents.
+- **This computer — installed CLIs** embeds Yagami in BetterBoard. It automatically discovers the Claude Code, Codex, OpenCode, Gemini, or other supported coding-agent binaries already installed and signed in on this machine. No URL or personal API key is involved.
+- **Remote Yagami server** accepts the URL of an existing Yagami server. A personal `ygm_…` key is available but optional, for servers that require one.
+
+The optional harness/model field follows Yagami routing in either mode: `claude`, `codex`, `codex:gpt-5.6-sol`, `opencode:provider/model`, and so on. Leave it blank to use Yagami's detected/default provider.
+
+It is entirely opt-in. Worth knowing before you turn it on:
+
+- Optional personal Yagami keys are written to `settings.json` in the app's user-data directory with `0600` permissions. They never enter the renderer — requests are made from the main process — and only the last four characters are returned for display.
+- Nothing is sent to a coding-agent harness or remote Yagami server unless you press Ask. It receives the cropped image and thread messages needed for the request. No other frames, layers, or board contents are sent.
 - Conversations are held in memory for the session only. They are not written into board files, so a `.betterboard.json` you share carries no chat history.
-- Requests go to `api.anthropic.com` and nowhere else, and are billed to your own account. Sonnet is the default; Opus and Haiku are in the panel's picker.
+- Any model drawing is validated and limited to simple geometry inside the boxed region; model output cannot execute code or address arbitrary board objects.
 
 ## File format
 
