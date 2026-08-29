@@ -11,18 +11,20 @@
 
 ---
 
-betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designed around drawing tablets like the Huion Kamvas Pro. Strokes are stored as vectors — pressure-weighted centerlines rendered with [perfect-freehand](https://github.com/steveruizok/perfect-freehand) — so the canvas is truly infinite, zooming is lossless, and erasing can remove whole strokes or only the ink under the eraser.
+betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designed around drawing tablets like the Huion Kamvas Pro. Strokes are stored as vectors — pressure-weighted centerlines rendered with [perfect-freehand](https://github.com/steveruizok/perfect-freehand) — so the canvas is truly infinite, zooming is lossless, and erasing can remove whole strokes or only what sits under the eraser — ink and image pixels alike.
 
 ## Features
 
 - **Four brushes** — **pen** (pressure-tapered ink), **pixel** (snaps to a shared world grid, so separate strokes and separate sessions line up — real pixel art), **marker** (flat chisel tip, translucent, builds up where strokes cross) and **paint** (a dry bristle brush with a solid body and frayed edges). Stroke width follows stylus pressure via Chromium pointer events; mouse strokes fall back to velocity-simulated pressure
 - **Infinite canvas** — pan, zoom, and rotate freely, with an adaptive dot grid that follows the view
 - **Stylus-native gestures** — the pen's eraser end erases, the barrel button pans, touch pans
-- **Two eraser modes** — remove whole strokes, or remove only the ink swept by the eraser circle; either mode is one undo step per gesture
+- **Two eraser modes** — remove whole strokes, or sweep the eraser circle to remove whatever sits under it: ink is clipped, and pictures get their pixels carved out directly, with no separate image-editing mode. Either way a gesture is one undo step
 - **Lasso select** — loop your pen around anything to select it, then drag the marching-ants outline to move it; `⌫` deletes the selection, `Esc` drops it
 - **Layers** — add, delete, rename, reorder by dragging, hide, and dim. Opacity composites the finished layer rather than each stroke, so overlaps never show seams — drop a sketch to 30% and ink over it cleanly. Drawing, erasing and selecting stay on the active layer, so what's underneath is safe
 - **Animation** — a timeline of frames, each with the full layer stack. Add, duplicate, delete and drag frames into order, set the frame rate, and play the loop back. Onion skinning ghosts the frames either side, tinted red behind and teal ahead, with adjustable reach and strength
 - **Images** — paste from the clipboard, drop files onto the board, or insert from disk. They land on the active layer and frame, interleaved with your ink in the order you made things, so you can draw over a reference or paste a screenshot on top of notes. Drag to move, drag a corner to scale, `⌫` to delete
+- **Magic wand** — click a picture to select a contiguous color region, Photoshop-style, with an adjustable tolerance; **Background** mode selects the whole border-connected backdrop with one click anywhere on the picture. Then **Erase selected** cuts those pixels to transparency (background removal in two clicks) or **Keep only** discards everything else. Both are single undo steps
+- **Workspace picker** — the first launch asks whether you're here as a student, artist, animator, or photo editor and arranges the starting layout to match. Every tool stays available regardless, and View → Choose Workspace reopens the choice any time
 - **Ask / Draw through Yagami** — box any part of the board to discuss it or ask the model to circle, connect, annotate, and sketch directly into the selected region. Model drawings are ordinary vector strokes with one-step undo. Use the signed-in coding-agent binaries on this computer directly, or connect to a remote personal Yagami server
 - **Normalize zoom** — one press rebases the current view as the new 100%, restoring the full zoom range without moving a pixel; when you hit the zoom-out floor, the button pulses to offer it
 - **Undo / redo**, dark & light board themes, autosave and session restore
@@ -60,13 +62,16 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Select an area | `S`, then loop the pen around it (tap a stroke to select just that one) |
 | Move a selection | Drag from inside the outline |
 | Delete / drop a selection | `⌫` / `Esc` |
+| Magic wand | `W`, then click a picture; **Point** selects the color region under the click, **Background** the whole backdrop, and the slider sets tolerance |
+| Apply a wand selection | **Erase selected** (or `⌫`) cuts it to transparency · **Keep only** cuts everything else |
+| Erase pixels from a picture | The **Area** eraser, swept straight across it |
 | Pan | Space + drag, `H`, middle/right drag, pen barrel button, touch, or two-finger scroll |
 | Zoom | Pinch, `⌘` + scroll, `⌘+` / `⌘−` / `⌘0`, or the zoom pill |
 | Zoom to fit | `⌘1` |
 | Normalize zoom | `⇧⌘N` or the ⤢ button in the zoom pill |
 | Rotate | hold `R` and drag the dial — snaps near 45° steps; double-click the dial to reset, `⌘1` also squares the view |
 | Brushes | `1` pen · `2` pixel · `3` marker · `4` paint |
-| Tools | `B`/`P` draw · `E` toggles eraser/pen · `S` toggles lasso/pen · `H` hand |
+| Tools | `B`/`P` draw · `E` toggles eraser/pen · `S` toggles lasso/pen · `W` toggles wand/pen · `H` hand |
 | Ask or draw with AI in a region | `A`, then drag a box (or `⌥⌘A`) |
 | Send · newline · new thread | `Enter` · `⇧Enter` · `+` in the panel |
 | Paste / insert an image | `⌘V` (Edit ▸ Paste), drop a file on the board, or `⇧⌘I` |
@@ -85,6 +90,7 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Undo / redo | `⌘Z` / `⇧⌘Z` |
 | New / open / save / export | `⌘N` / `⌘O` / `⌘S` / `⌘E` |
 | Dot grid · board theme | `⌘G` · `⇧⌘L` |
+| Choose workspace | View → Choose Workspace… |
 | Clear frame | `⌘⌫` |
 
 ## Asking and drawing with AI
