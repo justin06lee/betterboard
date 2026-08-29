@@ -36,6 +36,7 @@ interface BetterboardAPI {
   clipboardImage(): Promise<string | null>;
   clipboardText(): Promise<string>;
   exportPNG(dataURL: string): Promise<boolean>;
+  exportAnimation(bytes: Uint8Array, format: 'mp4' | 'webm' | 'gif'): Promise<boolean>;
   confirm(message: string, detail?: string): Promise<boolean>;
   onMenu(cb: (action: string) => void): void;
 

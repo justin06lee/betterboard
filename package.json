@@ -16,6 +16,8 @@
   },
   "dependencies": {
     "@justin06lee/yagami": "../yagami",
+    "gifenc": "^1.0.3",
+    "mediabunny": "^1.55.4",
     "perfect-freehand": "^1.2.2"
   },
   "devDependencies": {

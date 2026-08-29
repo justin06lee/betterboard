@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('betterboard', {
   clipboardImage: () => ipcRenderer.invoke('clipboard:image'),
   clipboardText: () => ipcRenderer.invoke('clipboard:text'),
   exportPNG: (dataURL) => ipcRenderer.invoke('board:export-png', dataURL),
+  exportAnimation: (bytes, format) => ipcRenderer.invoke('board:export-animation', bytes, format),
   confirm: (message, detail) => ipcRenderer.invoke('ui:confirm', message, detail),
   onMenu: (cb) => ipcRenderer.on('menu', (_e, action) => cb(action)),
 

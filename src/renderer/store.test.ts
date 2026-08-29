@@ -209,3 +209,44 @@ describe('Board.addFrame', () => {
     expect(order).toEqual(['stroke', 'image', 'stroke']);
   });
 });
+
+describe('Board.animationBBox', () => {
+  test('covers every frame, so an export does not jitter between them', () => {
+    const board = new Board();
+    const first = board.activeFrame;
+    const second = board.addFrame().id;
+
+    board.strokes.push({ ...stroke('a', 0, board), frame: first, bbox: { minX: -10, minY: -10, maxX: 0, maxY: 0 } });
+    board.strokes.push({ ...stroke('b', 1, board), frame: second, bbox: { minX: 0, minY: 0, maxX: 40, maxY: 5 } });
+    board.images.push({ ...image('c', 2, board), frame: second, x: 50, y: -30, width: 10, height: 10 });
+
+    expect(board.animationBBox()).toEqual({ minX: -10, minY: -30, maxX: 60, maxY: 5 });
+  });
+
+  test('ignores frames whose only content sits on a hidden layer', () => {
+    const board = new Board();
+    const visible = board.activeLayer;
+    const hidden = board.addLayer().id;
+    const other = board.addFrame().id;
+
+    board.strokes.push({
+      ...stroke('shown', 0, board),
+      frame: board.frames[0].id,
+      layer: visible,
+      bbox: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+    });
+    board.strokes.push({
+      ...stroke('ghost', 1, board),
+      frame: other,
+      layer: hidden,
+      bbox: { minX: 500, minY: 500, maxX: 600, maxY: 600 },
+    });
+    board.setLayerVisible(hidden, false);
+
+    expect(board.animationBBox()).toEqual({ minX: 0, minY: 0, maxX: 10, maxY: 10 });
+  });
+
+  test('is null for a board with nothing on it', () => {
+    expect(new Board().animationBBox()).toBeNull();
+  });
+});

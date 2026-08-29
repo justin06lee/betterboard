@@ -97,6 +97,23 @@ function layerScratchContext(width: number, height: number, transform: Matrix): 
   return sctx;
 }
 
+// Exports paint at their own size, which has nothing to do with the window, so
+// they keep a third scratch canvas rather than fighting the two above for
+// dimensions. One canvas serves every frame of an animation.
+let exportScratch: HTMLCanvasElement | null = null;
+function exportScratchContext(width: number, height: number, transform: Matrix): CanvasRenderingContext2D {
+  if (!exportScratch) exportScratch = document.createElement('canvas');
+  if (exportScratch.width !== width || exportScratch.height !== height) {
+    exportScratch.width = width;
+    exportScratch.height = height;
+  }
+  const sctx = exportScratch.getContext('2d')!;
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.clearRect(0, 0, width, height);
+  sctx.setTransform(...transform);
+  return sctx;
+}
+
 // Paints one layer's strokes into a context already carrying the world
 // transform. Strokes being dragged are lifted into a translated pass so a move
 // costs one extra transform rather than a rebuild — but they stay inside their
@@ -449,32 +466,59 @@ export function renderRegion(
   return canvas;
 }
 
-// Renders the visible layers into an offscreen canvas sized to fit the content.
-// Exports are always axis-aligned, regardless of the view rotation.
-export function renderExport(
+// Geometry shared by every export, still or moving: how large the image is and
+// where the world sits inside it. An animation works out one layout for the
+// whole timeline and reuses it — sizing each frame to its own content would
+// make the drawing jump around as the bounds changed under it.
+export interface ExportLayout {
+  width: number;
+  height: number;
+  transform: Matrix;
+}
+
+export interface ExportLayoutOpts {
+  pad?: number; // world units of margin around the content
+  maxDim?: number; // cap on the longest side, in pixels
+  maxScale?: number; // cap on magnification, so a small sketch is not blown up
+  // Rounds both sides up to a multiple of this. Video encoders want even
+  // dimensions: H.264 subsamples chroma in 2x2 blocks, so an odd side is either
+  // rejected outright or silently padded with a smeared edge column.
+  quantize?: number;
+}
+
+export function exportLayout(content: BBox, opts: ExportLayoutOpts = {}): ExportLayout {
+  const { pad = 60, maxDim = 4096, maxScale = 2, quantize = 1 } = opts;
+  const w = content.maxX - content.minX + pad * 2;
+  const h = content.maxY - content.minY + pad * 2;
+  const scale = Math.min(maxScale, maxDim / Math.max(w, h));
+  const side = (v: number) => Math.max(quantize, Math.ceil((v * scale) / quantize) * quantize);
+  return {
+    width: side(w),
+    height: side(h),
+    transform: [scale, 0, 0, scale, (pad - content.minX) * scale, (pad - content.minY) * scale],
+  };
+}
+
+// Paints the visible layers into a canvas already sized by `exportLayout`.
+// Exports are always axis-aligned, regardless of the view rotation. The canvas
+// is cleared first, so an animation can pour every frame through one canvas
+// instead of allocating a new one per frame.
+export function paintExport(
+  canvas: HTMLCanvasElement,
   strokes: Stroke[],
   images: BoardImage[],
   layers: Layer[],
-  content: BBox,
-  theme: Theme
-): HTMLCanvasElement {
-  const PAD = 60;
-  const MAX_DIM = 4096;
-  const w = content.maxX - content.minX + PAD * 2;
-  const h = content.maxY - content.minY + PAD * 2;
-  const scale = Math.min(2, MAX_DIM / Math.max(w, h));
-
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(w * scale));
-  canvas.height = Math.max(1, Math.round(h * scale));
+  theme: Theme,
+  layout: ExportLayout
+): void {
   const ctx = canvas.getContext('2d')!;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = theme.bg;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const transform: Matrix = [scale, 0, 0, scale, (PAD - content.minX) * scale, (PAD - content.minY) * scale];
   const everything: BBox = { minX: -Infinity, minY: -Infinity, maxX: Infinity, maxY: Infinity };
   const buckets = bucketByLayer(strokes, images, layers);
-  ctx.setTransform(...transform);
+  ctx.setTransform(...layout.transform);
   for (const layer of layers) {
     if (!layer.visible || layer.opacity === 0) continue;
     const list = buckets.get(layer.id)!;
@@ -483,17 +527,28 @@ export function renderExport(
       paintLayer(ctx, list, everything, null, null, null);
       continue;
     }
-    const tmp = document.createElement('canvas');
-    tmp.width = canvas.width;
-    tmp.height = canvas.height;
-    const tctx = tmp.getContext('2d')!;
-    tctx.setTransform(...transform);
+    const tctx = exportScratchContext(canvas.width, canvas.height, layout.transform);
     paintLayer(tctx, list, everything, null, null, null);
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = layer.opacity;
-    ctx.drawImage(tmp, 0, 0);
+    ctx.drawImage(tctx.canvas, 0, 0);
     ctx.restore();
   }
+}
+
+// Renders the visible layers into an offscreen canvas sized to fit the content.
+export function renderExport(
+  strokes: Stroke[],
+  images: BoardImage[],
+  layers: Layer[],
+  content: BBox,
+  theme: Theme
+): HTMLCanvasElement {
+  const layout = exportLayout(content);
+  const canvas = document.createElement('canvas');
+  canvas.width = layout.width;
+  canvas.height = layout.height;
+  paintExport(canvas, strokes, images, layers, theme, layout);
   return canvas;
 }

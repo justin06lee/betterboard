@@ -116,6 +116,7 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Save As…', accelerator: 'CmdOrCtrl+S', click: () => send('save') },
         { label: 'Export PNG…', accelerator: 'CmdOrCtrl+E', click: () => send('export') },
+        { label: 'Export Animation…', accelerator: 'Shift+CmdOrCtrl+E', click: () => send('export-animation') },
         { type: 'separator' },
         { label: 'Insert Image…', accelerator: 'CmdOrCtrl+Shift+I', click: () => send('insert-image') },
         { type: 'separator' },
@@ -428,6 +429,26 @@ function registerIpc() {
     });
     if (canceled || !filePath) return false;
     fs.writeFileSync(filePath, Buffer.from(dataURL.split(',')[1], 'base64'));
+    return true;
+  });
+
+  // Formats the animation export can write. The renderer has already encoded
+  // the bytes; all that is left is asking where they go.
+  const ANIMATION_FORMATS = {
+    mp4: { ext: 'mp4', name: 'MP4 Video' },
+    webm: { ext: 'webm', name: 'WebM Video' },
+    gif: { ext: 'gif', name: 'Animated GIF' },
+  };
+
+  ipcMain.handle('board:export-animation', async (_e, bytes, format) => {
+    const kind = ANIMATION_FORMATS[format];
+    if (!kind) return false;
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      defaultPath: `animation.${kind.ext}`,
+      filters: [{ name: kind.name, extensions: [kind.ext] }],
+    });
+    if (canceled || !filePath) return false;
+    fs.writeFileSync(filePath, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
     return true;
   });
 

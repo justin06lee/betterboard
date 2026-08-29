@@ -5,12 +5,16 @@ import { drawingToLines } from './ai-drawing';
 import type { AiConnection, AiConnectionKind, AiConnectionState } from './global';
 import type { Ghost } from './render';
 import type { ImageSrcChange, Rect, StrokeReplacement } from './store';
+import type { AnimFormat, AnimSettings } from './animation';
+import { animationLayout, exportAnimation, gifDelayMs } from './animation';
 import { HANDLE, render, renderExport, renderRegion } from './render';
 import { Board } from './store';
-import type { BoardImage, BrushId, Camera, Point, Stroke } from './types';
+import type { BBox, BoardImage, BrushId, Camera, Point, Stroke } from './types';
 import {
   BRUSHES,
   BRUSH_ORDER,
+  MAX_FPS,
+  MIN_FPS,
   MIN_SCALE,
   ONION_AFTER,
   ONION_BEFORE,
@@ -2309,6 +2313,10 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === 'Escape') {
+    if (!exportAnimEl.classList.contains('hidden')) {
+      closeExportDialog();
+      return;
+    }
     stopPlayback();
     clearSelection();
     if (regionDrag) {
@@ -2463,6 +2471,127 @@ async function exportPNG(): Promise<void> {
   await window.betterboard.exportPNG(exportCanvas.toDataURL('image/png'));
 }
 
+// ---- animation export -----------------------------------------------------
+
+const exportAnimEl = $('export-anim');
+const exportFormatSel = $('export-anim-format') as HTMLSelectElement;
+const exportFpsInput = $('export-anim-fps') as HTMLInputElement;
+const exportSizeSel = $('export-anim-size') as HTMLSelectElement;
+const exportNote = $('export-anim-note');
+const exportBar = $('export-anim-bar');
+const exportFill = $('export-anim-fill');
+const exportGoBtn = $('export-anim-go') as HTMLButtonElement;
+const exportCloseBtn = $('export-anim-close') as HTMLButtonElement;
+const exportFields = [exportFormatSel, exportFpsInput, exportSizeSel];
+
+let exporting = false;
+let exportCancelled = false;
+// Measured once when the dialog opens: the board cannot change while it is up,
+// and walking every frame on each keystroke would be wasted work.
+let exportContent: BBox | null = null;
+
+function exportSettings(): AnimSettings {
+  const fps = Math.round(Number(exportFpsInput.value));
+  return {
+    format: exportFormatSel.value as AnimFormat,
+    fps: Number.isFinite(fps) ? Math.min(MAX_FPS, Math.max(MIN_FPS, fps)) : board.fps,
+    maxDim: Number(exportSizeSel.value),
+  };
+}
+
+// Says what the file will actually be before anyone commits to making it —
+// including where the chosen format bends the numbers that were asked for.
+function updateExportNote(): void {
+  if (exporting) return;
+  if (!exportContent) {
+    exportNote.textContent = 'This board has nothing on it yet — draw something first.';
+    exportGoBtn.disabled = true;
+    return;
+  }
+  exportGoBtn.disabled = false;
+  const settings = exportSettings();
+  const layout = animationLayout(exportContent, settings);
+  const frames = board.frames.length;
+  const seconds = frames / settings.fps;
+  const parts = [
+    `${frames} frame${frames === 1 ? '' : 's'} · ${layout.width}×${layout.height} · ${seconds.toFixed(seconds < 10 ? 2 : 1)}s`,
+  ];
+  if (settings.format === 'gif') {
+    const real = 1000 / gifDelayMs(settings.fps);
+    if (Math.abs(real - settings.fps) > 0.05) {
+      parts.push(`GIF times frames in hundredths of a second, so this plays at about ${real.toFixed(1)}fps.`);
+    }
+    parts.push('GIF is capped at 256 colours a frame and grows quickly with size.');
+  }
+  exportNote.textContent = parts.join(' ');
+}
+
+function openExportDialog(): void {
+  if (exporting) return;
+  stopPlayback();
+  exportContent = board.animationBBox();
+  exportFpsInput.value = String(board.fps);
+  exportBar.classList.add('hidden');
+  exportFill.style.width = '0%';
+  updateExportNote();
+  exportAnimEl.classList.remove('hidden');
+}
+
+// While an export is running the same button stops it: the encode unwinds at
+// the next frame boundary and nothing half-written ever reaches a file.
+function closeExportDialog(): void {
+  if (exporting) {
+    exportCancelled = true;
+    exportNote.textContent = 'Stopping…';
+    return;
+  }
+  exportAnimEl.classList.add('hidden');
+}
+
+function setExportBusy(busy: boolean): void {
+  exporting = busy;
+  exportGoBtn.disabled = busy;
+  for (const field of exportFields) field.disabled = busy;
+  exportBar.classList.toggle('hidden', !busy);
+}
+
+async function runExportAnimation(): Promise<void> {
+  if (exporting || !exportContent) return;
+  const settings = exportSettings();
+  setExportBusy(true);
+  exportCancelled = false;
+  exportFill.style.width = '0%';
+  exportNote.textContent = `Rendering ${board.frames.length} frames…`;
+  try {
+    const result = await exportAnimation(board, THEMES[themeName], settings, {
+      onFrame: (done, total) => {
+        exportFill.style.width = `${Math.round((done / total) * 100)}%`;
+        exportNote.textContent = `Encoding frame ${done} of ${total}…`;
+      },
+      cancelled: () => exportCancelled,
+    });
+    setExportBusy(false);
+    exportCancelled = false;
+    if (result) await window.betterboard.exportAnimation(result.bytes, result.format);
+    exportAnimEl.classList.add('hidden');
+  } catch (err) {
+    setExportBusy(false);
+    exportCancelled = false;
+    exportNote.textContent = `Export failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+$('frame-export').addEventListener('click', openExportDialog);
+exportGoBtn.addEventListener('click', () => void runExportAnimation());
+exportCloseBtn.addEventListener('click', closeExportDialog);
+for (const field of exportFields) {
+  field.addEventListener('change', updateExportNote);
+  field.addEventListener('input', updateExportNote);
+}
+exportAnimEl.addEventListener('pointerdown', (e) => {
+  if (e.target === exportAnimEl) closeExportDialog();
+});
+
 window.betterboard.onMenu((action) => {
   switch (action) {
     case 'new':
@@ -2476,6 +2605,9 @@ window.betterboard.onMenu((action) => {
       break;
     case 'export':
       void exportPNG();
+      break;
+    case 'export-animation':
+      openExportDialog();
       break;
     case 'insert-image':
       void insertImageFile();
