@@ -159,6 +159,159 @@ body.mac .topbar {
   color: var(--accent);
 }
 
+.wand-tolerance {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px 0 9px;
+  border-left: 1px solid var(--bar-border);
+  margin-left: 4px;
+}
+
+.wand-tolerance input[type='range'] {
+  width: 64px;
+  accent-color: var(--accent);
+}
+
+.wand-tolerance span {
+  min-width: 20px;
+  font-size: 10px;
+  color: var(--fg-dim);
+  text-align: right;
+}
+
+.wand-actions {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--bar);
+  border: 1px solid var(--bar-border);
+  border-radius: 10px;
+  z-index: 11;
+}
+
+body.timeline-open .wand-actions {
+  bottom: calc(var(--timeline-h) + 14px);
+}
+
+.wand-actions.hidden {
+  display: none;
+}
+
+.wand-hint {
+  font-size: 11px;
+  color: var(--fg-dim);
+  padding-right: 2px;
+}
+
+.wand-actions button {
+  border: 1px solid var(--bar-border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.wand-actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---- welcome / workspace picker ---- */
+
+.welcome {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(5px);
+}
+
+.welcome.hidden {
+  display: none;
+}
+
+.welcome-card {
+  width: min(540px, 92vw);
+  background: var(--bar);
+  border: 1px solid var(--bar-border);
+  border-radius: 16px;
+  padding: 26px 26px 20px;
+}
+
+.welcome-card h1 {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 6px;
+}
+
+.welcome-card > p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  margin-bottom: 16px;
+}
+
+.welcome-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.welcome-options button {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  padding: 13px 14px;
+  border: 1px solid var(--bar-border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.welcome-options button:hover {
+  border-color: var(--accent);
+  background: var(--hover);
+}
+
+.welcome-options b {
+  font-size: 13px;
+}
+
+.welcome-options span {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+}
+
+.welcome-skip {
+  display: block;
+  margin: 14px auto 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.welcome-skip:hover {
+  color: var(--fg);
+}
+
 .swatch {
   width: 20px;
   height: 20px;

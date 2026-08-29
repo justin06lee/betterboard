@@ -1,9 +1,10 @@
 import { buildPath, strokeHit } from './ink';
 import { eraseStrokePoints } from './erase';
+import { backgroundSelect, dilate, floodSelect, maskBounds } from './pixels';
 import { drawingToLines } from './ai-drawing';
 import type { AiConnection, AiConnectionKind, AiConnectionState } from './global';
 import type { Ghost } from './render';
-import type { Rect, StrokeReplacement } from './store';
+import type { ImageSrcChange, Rect, StrokeReplacement } from './store';
 import { HANDLE, render, renderExport, renderRegion } from './render';
 import { Board } from './store';
 import type { BoardImage, BrushId, Camera, Point, Stroke } from './types';
@@ -31,9 +32,11 @@ import {
   uid,
 } from './types';
 
-type Tool = 'pen' | 'eraser' | 'select' | 'ask' | 'hand';
+type Tool = 'pen' | 'eraser' | 'select' | 'wand' | 'ask' | 'hand';
 type ThemeName = 'dark' | 'light';
 type EraserMode = 'stroke' | 'area';
+type WandMode = 'point' | 'background';
+type Persona = 'student' | 'artist' | 'animator' | 'photo';
 
 const ERASER_RADIUS = 16; // screen px
 const MIN_DIST = 0.75; // screen px between recorded points
@@ -59,12 +62,23 @@ let timelineOpen = false;
 let playing = false;
 let loop = true;
 
+let wandMode: WandMode = 'point';
+let wandTolerance = 32;
+
 let live: Stroke | null = null;
 let spaceHeld = false;
 let eraserCursor: { x: number; y: number } | null = null;
 const erasePending = new Set<string>();
 const areaEraseChanges = new Map<string, StrokeReplacement>();
 let areaEraseLast: Point | null = null;
+// Pictures the current area-erase gesture is carving pixels out of. Each entry
+// holds the working canvas the gesture paints into and the bitmap to undo to.
+const imageErase = new Map<string, { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; before: string }>();
+
+// The wand's pixel selection: a mask over one picture's bitmap, plus the
+// tinted overlay canvas that shows it. Cleared by anything that could move the
+// pixels out from under it.
+let wandSel: { imageId: string; mask: Uint8Array; width: number; height: number; overlay: HTMLCanvasElement } | null = null;
 
 // The lasso path while it is being drawn, then the committed selection it
 // produced. Both live in world coordinates, so they stay put under pan, zoom
@@ -102,11 +116,17 @@ const $ = (id: string) => document.getElementById(id)!;
 const toolButtons: Record<Exclude<Tool, 'pen'>, HTMLElement> = {
   eraser: $('tool-eraser'),
   select: $('tool-select'),
+  wand: $('tool-wand'),
   ask: $('tool-ask'),
   hand: $('tool-hand'),
 };
 const eraserModes = $('eraser-modes');
 const eraserModeButtons = [...eraserModes.querySelectorAll<HTMLButtonElement>('[data-eraser-mode]')];
+const wandModes = $('wand-modes');
+const wandModeButtons = [...wandModes.querySelectorAll<HTMLButtonElement>('[data-wand-mode]')];
+const wandToleranceInput = $('wand-tolerance') as HTMLInputElement;
+const wandActions = $('wand-actions');
+const welcomeEl = $('welcome');
 const brushButtons: Record<BrushId, HTMLElement> = {
   pen: $('tool-pen'),
   pixel: $('brush-pixel'),
@@ -183,6 +203,7 @@ function requestRender(): void {
       images: board.images.filter((im) => im.frame === frame),
       ghosts: playing ? [] : ghostCache,
       region: regionDrag ?? region?.quad ?? null,
+      wand: wandOverlay(frame),
     });
   });
 }
@@ -208,19 +229,21 @@ function scheduleAutosave(): void {
 }
 
 function savePrefs(): void {
-  localStorage.setItem('bb:prefs', JSON.stringify({ tool, brush, color, size, themeName, grid, eraserMode, layersOpen, timelineOpen, loop }));
+  localStorage.setItem('bb:prefs', JSON.stringify({ tool, brush, color, size, themeName, grid, eraserMode, wandMode, wandTolerance, layersOpen, timelineOpen, loop }));
 }
 
 function loadPrefs(): void {
   try {
     const p = JSON.parse(localStorage.getItem('bb:prefs') ?? '{}');
-    if (['pen', 'eraser', 'select', 'ask', 'hand'].includes(p.tool)) tool = p.tool;
+    if (['pen', 'eraser', 'select', 'wand', 'ask', 'hand'].includes(p.tool)) tool = p.tool;
     if (isBrush(p.brush)) brush = p.brush;
     if (typeof p.color === 'string') color = p.color;
     if (Number.isFinite(p.size)) size = Math.min(28, Math.max(1, p.size));
     if (p.themeName === 'light' || p.themeName === 'dark') themeName = p.themeName;
     if (typeof p.grid === 'boolean') grid = p.grid;
     if (p.eraserMode === 'stroke' || p.eraserMode === 'area') eraserMode = p.eraserMode;
+    if (p.wandMode === 'point' || p.wandMode === 'background') wandMode = p.wandMode;
+    if (Number.isFinite(p.wandTolerance)) wandTolerance = Math.min(120, Math.max(0, p.wandTolerance));
     if (typeof p.layersOpen === 'boolean') layersOpen = p.layersOpen;
     if (typeof p.timelineOpen === 'boolean') timelineOpen = p.timelineOpen;
     if (typeof p.loop === 'boolean') loop = p.loop;
@@ -334,6 +357,7 @@ function doRedo(): void {
 // Undoing a move should leave the outline wrapped around the strokes it holds;
 // any other edit can invalidate what is selected, so the selection is dropped.
 function afterEdit(moved: { ids: string[]; dx: number; dy: number } | null, kind?: string): void {
+  clearWandSelection(); // any edit can move the pixels out from under the mask
   const sel = selection;
   if (!sel) return;
   if (moved && moved.ids.length === sel.ids.size && moved.ids.every((id) => sel.ids.has(id))) {
@@ -424,11 +448,24 @@ function setTool(t: Tool): void {
   }
   syncBrushButtons();
   eraserModes.classList.toggle('hidden', t !== 'eraser');
+  wandModes.classList.toggle('hidden', t !== 'wand');
   if (t !== 'eraser') eraserCursor = null;
-  if (t !== 'select') clearSelection();
+  if (t !== 'select') clearSelection(); // also drops any wand selection
+  else clearWandSelection(); // the lasso survives, but the wand mask belongs to its tool
   updateCursor();
   savePrefs();
   requestRender();
+}
+
+function setWandMode(mode: WandMode): void {
+  wandMode = mode;
+  for (const button of wandModeButtons) {
+    button.classList.toggle('active', button.dataset.wandMode === mode);
+  }
+  toolButtons.wand.title = mode === 'point'
+    ? 'Magic wand (W) — click a picture to select its color region'
+    : 'Magic wand (W) — click a picture to select its whole background';
+  savePrefs();
 }
 
 function setEraserMode(mode: EraserMode): void {
@@ -438,7 +475,7 @@ function setEraserMode(mode: EraserMode): void {
   }
   toolButtons.eraser.title = mode === 'stroke'
     ? 'Eraser (E) — remove whole strokes'
-    : 'Eraser (E) — remove only ink under the circle';
+    : 'Eraser (E) — erase ink and image pixels under the circle';
   savePrefs();
 }
 
@@ -616,13 +653,74 @@ function eraseAreaAt(e: PointerEvent): void {
     }
     if (changed) areaEraseChanges.set(original.id, { index, before: original, after });
   }
+  // The same pass carves pixels out of any picture it crosses — erasing feels
+  // the same on a photograph as it does on ink, with no mode to enter first.
+  for (const image of board.images) {
+    if (image.frame !== board.activeFrame || image.layer !== board.activeLayer) continue;
+    if (!bboxIntersects(imageBBox(image), eraserBox)) continue;
+    eraseImagePixels(image, path, radius);
+  }
   areaEraseLast = point;
+}
+
+// The first touch swaps the picture's bitmap for a working canvas; every
+// following segment is punched straight out of it, so the hole appears under
+// the eraser as it moves. The bitmap swap is committed once, at gesture end.
+function eraseImagePixels(image: BoardImage, path: Point[], radius: number): void {
+  let entry = imageErase.get(image.id);
+  if (!entry) {
+    if (!image.el) return; // still decoding; nothing visible to erase yet
+    const { width, height } = naturalSize(image.el);
+    if (!width || !height) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const c = canvas.getContext('2d')!;
+    c.drawImage(image.el, 0, 0, width, height);
+    entry = { canvas, ctx: c, before: image.src };
+    imageErase.set(image.id, entry);
+    image.el = canvas;
+  }
+  const c = entry.ctx;
+  c.save();
+  // World → bitmap transform: under it the eraser capsule is drawn in world
+  // units and still lands on the right pixels, even on a stretched picture.
+  c.scale(entry.canvas.width / image.width, entry.canvas.height / image.height);
+  c.translate(-image.x, -image.y);
+  c.globalCompositeOperation = 'destination-out';
+  c.fillStyle = '#000';
+  c.strokeStyle = '#000';
+  c.lineWidth = radius * 2;
+  c.lineCap = 'round';
+  c.lineJoin = 'round';
+  c.beginPath();
+  if (path.length === 1) {
+    c.arc(path[0].x, path[0].y, radius, 0, Math.PI * 2);
+    c.fill();
+  } else {
+    c.moveTo(path[0].x, path[0].y);
+    for (let i = 1; i < path.length; i++) c.lineTo(path[i].x, path[i].y);
+    c.stroke();
+  }
+  c.restore();
+}
+
+// Encodes each carved picture once, at gesture end, and reports the swaps so
+// they join the same undo step as the ink the gesture clipped.
+function commitImageErase(): ImageSrcChange[] {
+  const changes: ImageSrcChange[] = [];
+  for (const [id, entry] of imageErase) {
+    changes.push({ id, from: entry.before, to: entry.canvas.toDataURL('image/png') });
+  }
+  imageErase.clear();
+  return changes;
 }
 
 function beginErase(e: PointerEvent): void {
   eraserCursor = { x: e.offsetX, y: e.offsetY };
   if (eraserMode === 'area') {
     areaEraseChanges.clear();
+    imageErase.clear();
     areaEraseLast = null;
     eraseAreaAt(e);
   } else {
@@ -1704,6 +1802,149 @@ canvas.addEventListener('drop', (e) => {
   })();
 });
 
+// ---- magic wand -----------------------------------------------------------
+
+function naturalSize(el: HTMLImageElement | HTMLCanvasElement): { width: number; height: number } {
+  return el instanceof HTMLCanvasElement
+    ? { width: el.width, height: el.height }
+    : { width: el.naturalWidth, height: el.naturalHeight };
+}
+
+// Rasterizes a picture's current bitmap so its pixels can be read.
+function imagePixels(image: BoardImage): { data: Uint8ClampedArray; width: number; height: number } | null {
+  if (!image.el) return null;
+  const { width, height } = naturalSize(image.el);
+  if (!width || !height) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const c = canvas.getContext('2d', { willReadFrequently: true })!;
+  c.drawImage(image.el, 0, 0, width, height);
+  return { data: c.getImageData(0, 0, width, height).data, width, height };
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+// The selection made visible: a soft accent tint over the chosen pixels and a
+// solid rim just outside them, baked into one canvas the renderer stretches
+// over the picture.
+function buildWandOverlay(mask: Uint8Array, width: number, height: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const c = canvas.getContext('2d')!;
+  const rim = dilate(mask, width, height);
+  const img = c.createImageData(width, height);
+  const [r, g, b] = hexToRgb(THEMES[themeName].accent);
+  for (let p = 0; p < mask.length; p++) {
+    const o = p * 4;
+    if (mask[p]) {
+      img.data[o] = r;
+      img.data[o + 1] = g;
+      img.data[o + 2] = b;
+      img.data[o + 3] = 84;
+    } else if (rim[p]) {
+      img.data[o] = r;
+      img.data[o + 1] = g;
+      img.data[o + 2] = b;
+      img.data[o + 3] = 255;
+    }
+  }
+  c.putImageData(img, 0, 0);
+  return canvas;
+}
+
+// Where the overlay goes this frame — looked up per render so it follows the
+// picture if it is moved or resized before the selection is used.
+function wandOverlay(frame: string): { x: number; y: number; width: number; height: number; canvas: HTMLCanvasElement } | null {
+  if (!wandSel) return null;
+  const image = board.images.find((im) => im.id === wandSel!.imageId);
+  if (!image || image.frame !== frame) return null;
+  return { x: image.x, y: image.y, width: image.width, height: image.height, canvas: wandSel.overlay };
+}
+
+function clearWandSelection(): void {
+  if (!wandSel) return;
+  wandSel = null;
+  wandActions.classList.add('hidden');
+  requestRender();
+}
+
+// One wand click: find the topmost picture in the active cell under the
+// pointer and select by color — the touched region in Point mode, the whole
+// border-connected backdrop in Background mode.
+function wandAt(e: PointerEvent): void {
+  const w = toWorld(camera, e.offsetX, e.offsetY);
+  let target: BoardImage | null = null;
+  for (let i = board.images.length - 1; i >= 0; i--) {
+    const im = board.images[i];
+    if (im.frame !== board.activeFrame || im.layer !== board.activeLayer) continue;
+    if (imageHit(im, w.x, w.y)) {
+      target = im;
+      break;
+    }
+  }
+  clearWandSelection();
+  if (!target) {
+    requestRender();
+    return;
+  }
+  const px = imagePixels(target);
+  if (!px) return;
+  const sx = Math.min(px.width - 1, Math.max(0, Math.floor(((w.x - target.x) / target.width) * px.width)));
+  const sy = Math.min(px.height - 1, Math.max(0, Math.floor(((w.y - target.y) / target.height) * px.height)));
+  const mask = wandMode === 'background'
+    ? backgroundSelect(px.data, px.width, px.height, wandTolerance)
+    : floodSelect(px.data, px.width, px.height, sx, sy, wandTolerance);
+  if (!maskBounds(mask, px.width, px.height)) return;
+  wandSel = {
+    imageId: target.id,
+    mask,
+    width: px.width,
+    height: px.height,
+    overlay: buildWandOverlay(mask, px.width, px.height),
+  };
+  wandActions.classList.remove('hidden');
+  requestRender();
+}
+
+// Applies the wand selection: cut the chosen pixels away, or keep only them
+// and cut everything else. Either way it is one undoable bitmap swap.
+function applyWandCut(keepSelected: boolean): void {
+  const sel = wandSel;
+  if (!sel) return;
+  const image = board.images.find((im) => im.id === sel.imageId);
+  if (!image || !image.el) return;
+  // Cutting away uses the mask grown by a pixel, so the anti-aliased fringe
+  // goes with the region it blends into instead of remaining as a halo.
+  const cut = keepSelected ? sel.mask : dilate(sel.mask, sel.width, sel.height);
+  const hole = document.createElement('canvas');
+  hole.width = sel.width;
+  hole.height = sel.height;
+  const hctx = hole.getContext('2d')!;
+  const stencil = hctx.createImageData(sel.width, sel.height);
+  for (let p = 0; p < cut.length; p++) {
+    if (keepSelected ? !cut[p] : cut[p]) stencil.data[p * 4 + 3] = 255;
+  }
+  hctx.putImageData(stencil, 0, 0);
+
+  const out = document.createElement('canvas');
+  out.width = sel.width;
+  out.height = sel.height;
+  const octx = out.getContext('2d')!;
+  octx.drawImage(image.el, 0, 0, sel.width, sel.height);
+  octx.globalCompositeOperation = 'destination-out';
+  octx.drawImage(hole, 0, 0);
+  board.setImageSrc(image.id, out.toDataURL('image/png'));
+  // The working canvas already shows the result; keep it on screen while the
+  // fresh data URL decodes so the picture never blinks out.
+  image.el = out;
+  clearWandSelection();
+}
+
 // ---- lasso selection ------------------------------------------------------
 
 // The ants only crawl while there is something to outline, so an idle board
@@ -1722,6 +1963,7 @@ function syncAnts(): void {
 }
 
 function clearSelection(): void {
+  clearWandSelection();
   if (!selection && !lasso) return;
   selection = null;
   lasso = null;
@@ -1862,6 +2104,10 @@ canvas.addEventListener('pointerdown', (e) => {
     drag = { kind: 'region', x0: e.offsetX, y0: e.offsetY };
     regionDrag = quadFromScreenRect(e.offsetX, e.offsetY, e.offsetX, e.offsetY);
     requestRender();
+  } else if (tool === 'wand' && e.button === 0) {
+    // A wand pick is a click, not a drag: select and end the gesture here.
+    wandAt(e);
+    return;
   } else if (tool === 'select' && e.button === 0) {
     const w = toWorld(camera, e.offsetX, e.offsetY);
     const grip = handleAt(e.offsetX, e.offsetY);
@@ -1981,7 +2227,7 @@ function endGesture(e: PointerEvent): void {
   } else if (drag.kind === 'erase') {
     if (eraserMode === 'area') {
       eraseAreaAt(e);
-      board.replaceStrokes([...areaEraseChanges.values()]);
+      board.replaceStrokes([...areaEraseChanges.values()], commitImageErase());
       areaEraseChanges.clear();
       areaEraseLast = null;
     } else {
@@ -2083,8 +2329,9 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     return;
   }
-  if ((e.key === 'Backspace' || e.key === 'Delete') && selection) {
-    deleteSelection();
+  if ((e.key === 'Backspace' || e.key === 'Delete') && (wandSel || selection)) {
+    if (wandSel) applyWandCut(false);
+    else deleteSelection();
     e.preventDefault();
     return;
   }
@@ -2104,6 +2351,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 's':
       setTool(tool === 'select' ? 'pen' : 'select');
+      break;
+    case 'w':
+      setTool(tool === 'wand' ? 'pen' : 'wand');
       break;
     case 'a':
       if (tool === 'ask') {
@@ -2272,6 +2522,9 @@ window.betterboard.onMenu((action) => {
     case 'toggle-theme':
       toggleTheme();
       break;
+    case 'choose-workspace':
+      welcomeEl.classList.remove('hidden');
+      break;
     case 'ai-connections':
       settingsForced = true;
       setAskOpen(true);
@@ -2341,8 +2594,44 @@ for (const id of BRUSH_ORDER) {
   brushButtons[id].addEventListener('click', () => setBrush(id));
 }
 toolButtons.select.addEventListener('click', () => setTool('select'));
+toolButtons.wand.addEventListener('click', () => setTool('wand'));
+for (const button of wandModeButtons) {
+  button.addEventListener('click', () => setWandMode(button.dataset.wandMode as WandMode));
+}
+wandToleranceInput.addEventListener('input', () => {
+  wandTolerance = Number(wandToleranceInput.value);
+  $('wand-tolerance-val').textContent = String(wandTolerance);
+  savePrefs();
+});
+$('wand-cut').addEventListener('click', () => applyWandCut(false));
+$('wand-keep').addEventListener('click', () => applyWandCut(true));
 toolButtons.ask.addEventListener('click', () => setTool('ask'));
 toolButtons.hand.addEventListener('click', () => setTool('hand'));
+
+// ---- welcome / workspace picker ---------------------------------------------
+
+// Every tool stays available to everyone; the choice only arranges the opening
+// layout, so a first launch lands in a workspace shaped for the work at hand.
+function applyPersona(persona: Persona): void {
+  localStorage.setItem('bb:persona', persona);
+  welcomeEl.classList.add('hidden');
+  setBrush(persona === 'artist' ? 'paint' : 'pen');
+  if (persona === 'photo') setTool('wand');
+  grid = persona === 'student';
+  gridBtn.classList.toggle('active', grid);
+  setLayersOpen(persona !== 'student');
+  setTimelineOpen(persona === 'animator');
+  savePrefs();
+  requestRender();
+}
+
+for (const button of welcomeEl.querySelectorAll<HTMLButtonElement>('[data-persona]')) {
+  button.addEventListener('click', () => applyPersona(button.dataset.persona as Persona));
+}
+$('welcome-skip').addEventListener('click', () => {
+  localStorage.setItem('bb:persona', 'skipped');
+  welcomeEl.classList.add('hidden');
+});
 
 for (const c of SWATCHES) {
   const btn = document.createElement('button');
@@ -2386,6 +2675,9 @@ async function main(): Promise<void> {
   loadPrefs();
   applyTheme();
   setEraserMode(eraserMode);
+  setWandMode(wandMode);
+  wandToleranceInput.value = String(wandTolerance);
+  $('wand-tolerance-val').textContent = String(wandTolerance);
   setTool(tool);
   syncBrushButtons();
   setColor(color);
@@ -2435,6 +2727,10 @@ async function main(): Promise<void> {
   syncOnionPanel();
   refreshGhosts();
   requestRender();
+
+  // First launch: ask what kind of work this board is for, so the layout
+  // starts out shaped for it. Answered (or skipped) exactly once.
+  if (!localStorage.getItem('bb:persona')) welcomeEl.classList.remove('hidden');
 }
 
 void main();
