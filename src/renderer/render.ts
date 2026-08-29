@@ -41,6 +41,9 @@ export interface RenderOpts {
   // The region being asked about, as a world-space quad so it stays pinned to
   // the drawing through pan, zoom and rotation.
   region: Point[] | null;
+  // The magic-wand selection: a tinted mask canvas stretched over its picture's
+  // world rectangle, so it stays glued to the pixels it selects.
+  wand: { x: number; y: number; width: number; height: number; canvas: HTMLCanvasElement } | null;
 }
 
 const REGION_COLOR = '#a78bfa';
@@ -336,6 +339,11 @@ export function render(
     ctx.globalAlpha = layer.opacity;
     ctx.drawImage(scratch!, 0, 0);
     ctx.restore();
+  }
+
+  if (opts.wand) {
+    ctx.setTransform(...world);
+    ctx.drawImage(opts.wand.canvas, opts.wand.x, opts.wand.y, opts.wand.width, opts.wand.height);
   }
 
   // Screen-space overlay.

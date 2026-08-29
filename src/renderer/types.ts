@@ -95,7 +95,9 @@ export interface BoardImage {
   height: number;
   layer: string;
   frame: string;
-  el?: HTMLImageElement; // decoded bitmap, rebuilt on load rather than saved
+  // Decoded bitmap, rebuilt on load rather than saved. While pixels are being
+  // erased it is the working canvas itself, so edits show as they happen.
+  el?: HTMLImageElement | HTMLCanvasElement;
 }
 
 // Anything imported larger than this is scaled down on the way in: a board file
