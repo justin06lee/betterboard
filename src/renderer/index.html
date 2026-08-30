@@ -247,8 +247,8 @@
     <button id="wand-keep" title="Keep only the selected pixels; everything else goes transparent">Keep only</button>
   </div>
 
-  <div id="export-anim" class="welcome hidden">
-    <div class="welcome-card">
+  <div id="export-anim" class="sheet hidden">
+    <div class="sheet-card">
       <h1>Export animation</h1>
       <p id="export-anim-blurb">Every frame of the timeline, rendered at its own size and written out as one file.</p>
       <div class="export-rows">
@@ -287,8 +287,8 @@
     </div>
   </div>
 
-  <div id="welcome" class="welcome hidden">
-    <div class="welcome-card">
+  <div id="welcome" class="sheet hidden">
+    <div class="sheet-card">
       <h1>What brings you to BetterBoard?</h1>
       <p>This only arranges the starting layout — every tool stays available, and you can change it any time from View&nbsp;→&nbsp;Choose&nbsp;Workspace.</p>
       <div class="welcome-options">
@@ -307,6 +307,10 @@
         <button data-persona="photo">
           <b>Photo editor</b>
           <span>Magic wand, background removal and pixel erasing on your images.</span>
+        </button>
+        <button data-persona="anything" class="welcome-any">
+          <b>Anything</b>
+          <span>Just the standard setup — pen, dot grid and layers. Nothing else assumed.</span>
         </button>
       </div>
       <button id="welcome-skip" class="welcome-skip">Keep the current layout</button>

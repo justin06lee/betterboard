@@ -40,7 +40,7 @@ type Tool = 'pen' | 'eraser' | 'select' | 'wand' | 'ask' | 'hand';
 type ThemeName = 'dark' | 'light';
 type EraserMode = 'stroke' | 'area';
 type WandMode = 'point' | 'background';
-type Persona = 'student' | 'artist' | 'animator' | 'photo';
+type Persona = 'student' | 'artist' | 'animator' | 'photo' | 'anything';
 
 const ERASER_RADIUS = 16; // screen px
 const MIN_DIST = 0.75; // screen px between recorded points
@@ -2744,15 +2744,36 @@ toolButtons.hand.addEventListener('click', () => setTool('hand'));
 
 // Every tool stays available to everyone; the choice only arranges the opening
 // layout, so a first launch lands in a workspace shaped for the work at hand.
+// `anything` is the answer for people who do not want one: it is the app's own
+// defaults, spelled out, so picking it is a decision rather than a shrug.
+interface Workspace {
+  tool: Tool;
+  brush: BrushId;
+  grid: boolean;
+  layers: boolean;
+  timeline: boolean;
+}
+
+const WORKSPACES: Record<Persona, Workspace> = {
+  anything: { tool: 'pen', brush: 'pen', grid: true, layers: true, timeline: false },
+  student: { tool: 'pen', brush: 'pen', grid: true, layers: false, timeline: false },
+  artist: { tool: 'pen', brush: 'paint', grid: false, layers: true, timeline: false },
+  animator: { tool: 'pen', brush: 'pen', grid: false, layers: true, timeline: true },
+  photo: { tool: 'wand', brush: 'pen', grid: false, layers: true, timeline: false },
+};
+
 function applyPersona(persona: Persona): void {
+  const workspace = WORKSPACES[persona] ?? WORKSPACES.anything;
   localStorage.setItem('bb:persona', persona);
   welcomeEl.classList.add('hidden');
-  setBrush(persona === 'artist' ? 'paint' : 'pen');
-  if (persona === 'photo') setTool('wand');
-  grid = persona === 'student';
+  // Brush first: setBrush pulls the tool back to the pen, which would undo a
+  // workspace that opens on a different one.
+  setBrush(workspace.brush);
+  setTool(workspace.tool);
+  grid = workspace.grid;
   gridBtn.classList.toggle('active', grid);
-  setLayersOpen(persona !== 'student');
-  setTimelineOpen(persona === 'animator');
+  setLayersOpen(workspace.layers);
+  setTimelineOpen(workspace.timeline);
   savePrefs();
   requestRender();
 }

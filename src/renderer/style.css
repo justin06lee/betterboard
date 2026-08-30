@@ -225,9 +225,9 @@ body.timeline-open .wand-actions {
   color: var(--accent);
 }
 
-/* ---- welcome / workspace picker ---- */
+/* ---- sheets: the centred cards that take over the window ---- */
 
-.welcome {
+.sheet {
   position: fixed;
   inset: 0;
   z-index: 40;
@@ -237,11 +237,11 @@ body.timeline-open .wand-actions {
   backdrop-filter: blur(5px);
 }
 
-.welcome.hidden {
+.sheet.hidden {
   display: none;
 }
 
-.welcome-card {
+.sheet-card {
   width: min(540px, 92vw);
   background: var(--bar);
   border: 1px solid var(--bar-border);
@@ -249,19 +249,21 @@ body.timeline-open .wand-actions {
   padding: 26px 26px 20px;
 }
 
-.welcome-card h1 {
+.sheet-card h1 {
   font-size: 17px;
   font-weight: 600;
   color: var(--fg);
   margin-bottom: 6px;
 }
 
-.welcome-card > p {
+.sheet-card > p {
   font-size: 12px;
   line-height: 1.5;
   color: var(--fg-dim);
   margin-bottom: 16px;
 }
+
+/* ---- welcome / workspace picker ---- */
 
 .welcome-options {
   display: grid;
@@ -295,6 +297,16 @@ body.timeline-open .wand-actions {
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--fg-dim);
+}
+
+/* The neutral answer runs across the bottom, so it reads as "none of those"
+   rather than a fifth kind of person. */
+.welcome-options .welcome-any {
+  grid-column: 1 / -1;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  column-gap: 9px;
+  padding: 11px 14px;
 }
 
 .welcome-skip {
