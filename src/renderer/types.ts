@@ -16,7 +16,7 @@ export interface BBox {
   maxY: number;
 }
 
-export type BrushId = 'pen' | 'pixel' | 'marker' | 'paint';
+export type BrushId = 'pen' | 'pixel' | 'marker' | 'paint' | 'chalk';
 
 export interface Brush {
   id: BrushId;
@@ -55,9 +55,18 @@ export const BRUSHES: Record<BrushId, Brush> = {
     alpha: 0.9,
     sizeScale: 1.9,
   },
+  chalk: {
+    id: 'chalk',
+    label: 'Chalk',
+    hint: 'Chalk (5) — dry and grainy, with dusty edges',
+    // Not quite opaque: chalk sits on the tooth of a board rather than soaking
+    // in, and a little of the board reading through is most of what sells it.
+    alpha: 0.88,
+    sizeScale: 1.8,
+  },
 };
 
-export const BRUSH_ORDER: BrushId[] = ['pen', 'pixel', 'marker', 'paint'];
+export const BRUSH_ORDER: BrushId[] = ['pen', 'pixel', 'marker', 'paint', 'chalk'];
 
 export function isBrush(v: unknown): v is BrushId {
   return typeof v === 'string' && v in BRUSHES;
