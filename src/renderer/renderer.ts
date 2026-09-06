@@ -136,6 +136,7 @@ const brushButtons: Record<BrushId, HTMLElement> = {
   pixel: $('brush-pixel'),
   marker: $('brush-marker'),
   paint: $('brush-paint'),
+  chalk: $('brush-chalk'),
 };
 const swatchesEl = $('swatches');
 const colorInput = $('color-input') as HTMLInputElement;
@@ -2352,6 +2353,7 @@ window.addEventListener('keydown', (e) => {
     case '2':
     case '3':
     case '4':
+    case '5':
       setBrush(BRUSH_ORDER[Number(e.key) - 1]);
       break;
     case 'e':

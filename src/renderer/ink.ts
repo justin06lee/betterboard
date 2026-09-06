@@ -11,6 +11,8 @@ export function buildPath(stroke: Stroke, live = false): Path2D {
       return markerPath(stroke, live);
     case 'paint':
       return paintPath(stroke, live);
+    case 'chalk':
+      return chalkPath(stroke);
     default:
       return penPath(stroke, live);
   }
@@ -108,6 +110,89 @@ function paintPath(stroke: Stroke, live: boolean): Path2D {
       }
     );
     appendOutline(path, outline);
+  }
+  return path;
+}
+
+// Dry powder dragged across a board's tooth: a broad body that never quite
+// fills in, grain right through the middle, and edges that fray into loose
+// dust rather than stopping on a line. It is one path of many small dabs, and
+// the gaps between them are what reads as chalk — so unlike the other brushes
+// the shape carries the texture, not the fill.
+//
+// Grain goes down in rows along the centerline. Row spacing and grain radius
+// both scale with the stroke size while the count per row barely moves, which
+// is what holds the coverage — the fraction of the band actually filled — near
+// constant across sizes. Scaling the row count instead lets a fat stick pack
+// its rows tight enough to fill in solid, which stops looking like chalk and
+// starts looking like a marker.
+const CHALK_MAX_DABS = 16000; // a runaway guard for a very long stroke
+
+function chalkPath(stroke: Stroke): Path2D {
+  const path = new Path2D();
+  const pts = stroke.points;
+  const half = stroke.size / 2;
+  if (pts.length < 2) return dot(path, stroke, half * 0.7);
+
+  // Seeded from the stroke's own seed, and consumed in centerline order, so a
+  // rebuild lands every grain exactly where it was — and so the grain already
+  // on screen does not crawl as the rest of the stroke is still being drawn.
+  const rand = mulberry32(stroke.seed >>> 0);
+  // Tuned for how much of the band ends up actually covered, which is not the
+  // same as how much is thrown at it — grains land at random and overlap, so
+  // the covered fraction is 1 - e^-density. Aiming straight at a coverage
+  // number without that lands about half as dense as intended, and chalk turns
+  // into spray paint.
+  const step = Math.max(0.8, stroke.size * 0.15);
+  const perRow = Math.max(7, Math.round(8 + stroke.size * 0.16));
+  const grain = Math.max(0.5, stroke.size * 0.09);
+
+  let dabs = 0;
+  let carry = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) continue;
+    const tx = dx / len;
+    const ty = dy / len;
+
+    let d = carry;
+    for (; d < len; d += step) {
+      const t = d / len;
+      const cx = a.x + dx * t;
+      const cy = a.y + dy * t;
+      // A mouse reports a flat 0.5, which would make every row identical, so
+      // it gets a fixed middling press instead of a simulated one — chalk has
+      // no taper to simulate, only more or less dust.
+      const press = stroke.pen ? a.p + (b.p - a.p) * t : 0.62;
+      // Held lightly, chalk narrows and only catches the high points of the
+      // tooth; leaned on, it broadens and fills. The per-row wobble is what
+      // keeps the edge of the band from running straight.
+      const width = half * (0.55 + 0.45 * press) * (0.85 + rand() * 0.3);
+      const skip = 0.34 - 0.2 * press;
+
+      for (let g = 0; g < perRow; g++) {
+        if (rand() < skip) continue;
+        // Near-even across the band, pulled in a little at random: enough of a
+        // body to read as a stroke, not so centre-heavy that the holes — which
+        // are the grain — get filled in where the mark is most visible. The
+        // occasional wider throw is the dust that lands off the mark.
+        const across = (rand() * 2 - 1) * (0.7 + rand() * 0.3) * width * (rand() < 0.07 ? 1.4 : 1);
+        const along = (rand() - 0.5) * step * 1.6;
+        const r = grain * (0.5 + rand() * 0.8);
+        const x = cx - ty * across + tx * along;
+        const y = cy + tx * across + ty * along;
+        // arc() draws a line from wherever the path already is, so every dab
+        // has to start its own subpath or the grain gets strung together.
+        path.moveTo(x + r, y);
+        path.arc(x, y, r, 0, Math.PI * 2);
+        if (++dabs >= CHALK_MAX_DABS) return path;
+      }
+    }
+    carry = d - len;
   }
   return path;
 }

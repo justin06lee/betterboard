@@ -15,7 +15,7 @@ betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designe
 
 ## Features
 
-- **Four brushes** — **pen** (pressure-tapered ink), **pixel** (snaps to a shared world grid, so separate strokes and separate sessions line up — real pixel art), **marker** (flat chisel tip, translucent, builds up where strokes cross) and **paint** (a dry bristle brush with a solid body and frayed edges). Stroke width follows stylus pressure via Chromium pointer events; mouse strokes fall back to velocity-simulated pressure
+- **Five brushes** — **pen** (pressure-tapered ink), **pixel** (snaps to a shared world grid, so separate strokes and separate sessions line up — real pixel art), **marker** (flat chisel tip, translucent, builds up where strokes cross), **paint** (a dry bristle brush with a solid body and frayed edges) and **chalk** (dry, grainy powder with dusty edges — the grain is real gaps in the mark, so it stays grainy at any size and any zoom). Stroke width follows stylus pressure via Chromium pointer events; mouse strokes fall back to velocity-simulated pressure
 - **Infinite canvas** — pan, zoom, and rotate freely, with an adaptive dot grid that follows the view
 - **Stylus-native gestures** — the pen's eraser end erases, the barrel button pans, touch pans
 - **Two eraser modes** — remove whole strokes, or sweep the eraser circle to remove whatever sits under it: ink is clipped, and pictures get their pixels carved out directly, with no separate image-editing mode. Either way a gesture is one undo step
@@ -71,7 +71,7 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Zoom to fit | `⌘1` |
 | Normalize zoom | `⇧⌘N` or the ⤢ button in the zoom pill |
 | Rotate | hold `R` and drag the dial — snaps near 45° steps; double-click the dial to reset, `⌘1` also squares the view |
-| Brushes | `1` pen · `2` pixel · `3` marker · `4` paint |
+| Brushes | `1` pen · `2` pixel · `3` marker · `4` paint · `5` chalk |
 | Tools | `B`/`P` draw · `E` toggles eraser/pen · `S` toggles lasso/pen · `W` toggles wand/pen · `H` hand |
 | Ask or draw with AI in a region | `A`, then drag a box (or `⌥⌘A`) |
 | Send · newline · new thread | `Enter` · `⇧Enter` · `+` in the panel |
