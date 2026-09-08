@@ -92,7 +92,7 @@ let selection: { ids: Set<string>; images: Set<string>; poly: Point[] } | null =
 let moveX = 0;
 let moveY = 0;
 let hoverInSelection = false;
-let hoverHandle = false;
+let hoverHandle: string | null = null;
 let dashOffset = 0;
 let antsTimer: number | undefined;
 
@@ -102,7 +102,7 @@ type Drag =
   | { kind: 'lasso' }
   | { kind: 'move'; startX: number; startY: number }
   | { kind: 'region'; x0: number; y0: number }
-  | { kind: 'resize'; id: string; anchor: Point; from: Rect }
+  | { kind: 'resize'; id: string; anchor: Point; from: Rect; mode: GripMode }
   | { kind: 'pan'; startX: number; startY: number; camX: number; camY: number };
 let drag: Drag | null = null;
 let activePointer: number | null = null;
@@ -538,8 +538,8 @@ function updateUndoButtons(): void {
 function updateCursor(): void {
   if (drag?.kind === 'pan') canvas.style.cursor = 'grabbing';
   else if (drag?.kind === 'move') canvas.style.cursor = 'grabbing';
-  else if (drag?.kind === 'resize') canvas.style.cursor = 'nwse-resize';
-  else if (tool === 'select' && hoverHandle) canvas.style.cursor = 'nwse-resize';
+  else if (drag?.kind === 'resize') canvas.style.cursor = drag.mode === 'x' ? 'ew-resize' : drag.mode === 'y' ? 'ns-resize' : 'nwse-resize';
+  else if (tool === 'select' && hoverHandle) canvas.style.cursor = hoverHandle;
   else if (spaceHeld || tool === 'hand') canvas.style.cursor = 'grab';
   else if (tool === 'eraser') canvas.style.cursor = 'none';
   else if (tool === 'select' && hoverInSelection) canvas.style.cursor = 'move';
@@ -1664,26 +1664,46 @@ function selectImage(image: BoardImage): void {
   requestRender();
 }
 
-// The four corners of the selected picture, when a single one is selected on
-// its own. Null the rest of the time, including when ink is in the selection.
+// The eight grips of the selected picture: four corners, then four edge
+// midpoints (top, right, bottom, left). Corners scale; edges stretch one axis.
 function selectionGrips(): Point[] | null {
   const sel = selection;
   if (!sel || sel.ids.size > 0 || sel.images.size !== 1) return null;
   const image = board.images.find((im) => im.id === [...sel.images][0]);
-  return image ? rectPoly(imageBBox(image)) : null;
+  if (!image) return null;
+  const b = imageBBox(image);
+  const cx = (b.minX + b.maxX) / 2;
+  const cy = (b.minY + b.maxY) / 2;
+  return [
+    { x: b.minX, y: b.minY },
+    { x: b.maxX, y: b.minY },
+    { x: b.maxX, y: b.maxY },
+    { x: b.minX, y: b.maxY },
+    { x: cx, y: b.minY },
+    { x: b.maxX, y: cy },
+    { x: cx, y: b.maxY },
+    { x: b.minX, y: cy },
+  ];
 }
 
-// Which corner grip, if any, is under a screen point. Returns the opposite
-// corner, since that is the one a resize pivots around.
-function handleAt(sx: number, sy: number): { image: BoardImage; anchor: Point } | null {
+type GripMode = 'corner' | 'x' | 'y';
+
+// Which grip, if any, is under a screen point. Corners pivot around the
+// opposite corner; edges stretch on one axis about the opposite edge.
+function handleAt(sx: number, sy: number): { image: BoardImage; anchor: Point; mode: GripMode } | null {
   if (!selection || selection.images.size !== 1 || selection.ids.size > 0) return null;
   const image = board.images.find((im) => im.id === [...selection!.images][0]);
   if (!image) return null;
-  const corners = rectPoly(imageBBox(image));
+  const corners = selectionGrips();
+  if (!corners) return null;
+  // Opposite grip for each index above: corners mirror across the center,
+  // edges mirror to the opposite edge.
+  const opposite = [2, 3, 0, 1, 6, 7, 4, 5];
   for (let i = 0; i < corners.length; i++) {
     const p = toScreen(camera, corners[i].x, corners[i].y);
     if (Math.abs(p.x - sx) <= HANDLE && Math.abs(p.y - sy) <= HANDLE) {
-      return { image, anchor: corners[(i + 2) % 4] };
+      const mode: GripMode = i < 4 ? 'corner' : i % 2 === 1 ? 'x' : 'y';
+      return { image, anchor: corners[opposite[i]], mode };
     }
   }
   return null;
@@ -1691,10 +1711,29 @@ function handleAt(sx: number, sy: number): { image: BoardImage; anchor: Point } 
 
 const MIN_IMAGE = 8; // world units
 
-// Scales about the anchored corner, keeping the picture's proportions.
-function resizeRect(from: Rect, anchor: Point, w: Point): Rect {
+// Scales about the anchored corner. Corners keep proportions unless `free`
+// (Shift); edge grips stretch a single axis about the opposite edge.
+function resizeRect(from: Rect, anchor: Point, w: Point, mode: GripMode, free: boolean): Rect {
+  if (mode === 'x') {
+    const width = Math.max(MIN_IMAGE, Math.abs(w.x - anchor.x));
+    return { x: Math.min(anchor.x, w.x), y: from.y, width, height: from.height };
+  }
+  if (mode === 'y') {
+    const height = Math.max(MIN_IMAGE, Math.abs(w.y - anchor.y));
+    return { x: from.x, y: Math.min(anchor.y, w.y), width: from.width, height };
+  }
   const dx = w.x - anchor.x;
   const dy = w.y - anchor.y;
+  if (free) {
+    const width = Math.max(MIN_IMAGE, Math.abs(dx));
+    const height = Math.max(MIN_IMAGE, Math.abs(dy));
+    return {
+      x: dx < 0 ? anchor.x - width : anchor.x,
+      y: dy < 0 ? anchor.y - height : anchor.y,
+      width,
+      height,
+    };
+  }
   const k = Math.max(Math.abs(dx) / from.width, Math.abs(dy) / from.height);
   const width = Math.max(MIN_IMAGE, from.width * k);
   const height = Math.max(MIN_IMAGE, from.height * k);
@@ -1975,7 +2014,7 @@ function clearSelection(): void {
   moveX = 0;
   moveY = 0;
   hoverInSelection = false;
-  hoverHandle = false;
+  hoverHandle = null;
   syncAnts();
   updateCursor();
   requestRender();
@@ -2121,6 +2160,7 @@ canvas.addEventListener('pointerdown', (e) => {
         kind: 'resize',
         id: grip.image.id,
         anchor: grip.anchor,
+        mode: grip.mode,
         from: { x: grip.image.x, y: grip.image.y, width: grip.image.width, height: grip.image.height },
       };
     } else if (selection && pointInPolygon(selection.poly, w.x, w.y)) {
@@ -2131,6 +2171,7 @@ canvas.addEventListener('pointerdown', (e) => {
     } else {
       selection = null;
       hoverInSelection = false;
+      hoverHandle = null;
       lasso = [w];
       drag = { kind: 'lasso' };
       syncAnts();
@@ -2155,7 +2196,8 @@ canvas.addEventListener('pointermove', (e) => {
     } else if (tool === 'select' && selection) {
       const w = toWorld(camera, e.offsetX, e.offsetY);
       const inside = pointInPolygon(selection.poly, w.x, w.y);
-      const onGrip = handleAt(e.offsetX, e.offsetY) !== null;
+      const grip = handleAt(e.offsetX, e.offsetY);
+      const onGrip = grip ? (grip.mode === 'x' ? 'ew-resize' : grip.mode === 'y' ? 'ns-resize' : 'nwse-resize') : null;
       if (inside !== hoverInSelection || onGrip !== hoverHandle) {
         hoverInSelection = inside;
         hoverHandle = onGrip;
@@ -2168,7 +2210,7 @@ canvas.addEventListener('pointermove', (e) => {
     const resize = drag;
     const image = board.images.find((im) => im.id === resize.id);
     if (image) {
-      const r = resizeRect(resize.from, resize.anchor, toWorld(camera, e.offsetX, e.offsetY));
+      const r = resizeRect(resize.from, resize.anchor, toWorld(camera, e.offsetX, e.offsetY), resize.mode, e.shiftKey);
       image.x = r.x;
       image.y = r.y;
       image.width = r.width;

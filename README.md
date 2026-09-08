@@ -22,7 +22,7 @@ betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designe
 - **Lasso select** — loop your pen around anything to select it, then drag the marching-ants outline to move it; `⌫` deletes the selection, `Esc` drops it
 - **Layers** — add, delete, rename, reorder by dragging, hide, and dim. Opacity composites the finished layer rather than each stroke, so overlaps never show seams — drop a sketch to 30% and ink over it cleanly. Drawing, erasing and selecting stay on the active layer, so what's underneath is safe
 - **Animation** — a timeline of frames, each with the full layer stack. Add, duplicate, delete and drag frames into order, set the frame rate, and play the loop back. Onion skinning ghosts the frames either side, tinted red behind and teal ahead, with adjustable reach and strength
-- **Images** — paste from the clipboard, drop files onto the board, or insert from disk. They land on the active layer and frame, interleaved with your ink in the order you made things, so you can draw over a reference or paste a screenshot on top of notes. Drag to move, drag a corner to scale, `⌫` to delete
+- **Images** — paste from the clipboard, drop files onto the board, or insert from disk. They land on the active layer and frame, interleaved with your ink in the order you made things, so you can draw over a reference or paste a screenshot on top of notes. Drag to move, drag a corner to scale (`⇧` stretches freely), drag an edge to stretch one axis, `⌫` to delete
 - **Magic wand** — click a picture to select a contiguous color region, Photoshop-style, with an adjustable tolerance; **Background** mode selects the whole border-connected backdrop with one click anywhere on the picture. Then **Erase selected** cuts those pixels to transparency (background removal in two clicks) or **Keep only** discards everything else. Both are single undo steps
 - **Workspace picker** — the first launch asks whether you're here as a student, artist, animator, or photo editor and arranges the starting layout to match, or **Anything** for the plain default setup with nothing assumed. Every tool stays available whichever you pick, and View → Choose Workspace reopens the choice any time — picking Anything again is also how you put a layout you have wandered away from back to standard
 - **Ask / Draw through Yagami** — box any part of the board to discuss it or ask the model to circle, connect, annotate, and sketch directly into the selected region. Model drawings are ordinary vector strokes with one-step undo. Use the signed-in coding-agent binaries on this computer directly, or connect to a remote personal Yagami server
@@ -76,7 +76,7 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Ask or draw with AI in a region | `A`, then drag a box (or `⌥⌘A`) |
 | Send · newline · new thread | `Enter` · `⇧Enter` · `+` in the panel |
 | Paste / insert an image | `⌘V` (Edit ▸ Paste), drop a file on the board, or `⇧⌘I` |
-| Move / scale / delete an image | Drag it · drag a corner grip · `⌫` |
+| Move / scale / stretch / delete an image | Drag it · corner grip scales (`⇧` stretches freely) · edge grip stretches one axis · `⌫` |
 | Timeline | `T` or `⌘T` |
 | Play / pause | `Enter` (or `⌘↩`) |
 | Previous / next frame | `←` / `→` |
