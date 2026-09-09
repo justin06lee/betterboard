@@ -16,7 +16,7 @@ export interface BBox {
   maxY: number;
 }
 
-export type BrushId = 'pen' | 'pixel' | 'marker' | 'paint' | 'chalk';
+export type BrushId = 'pen' | 'pixel' | 'marker' | 'paint' | 'chalk' | 'liner';
 
 export interface Brush {
   id: BrushId;
@@ -64,9 +64,20 @@ export const BRUSHES: Record<BrushId, Brush> = {
     alpha: 0.88,
     sizeScale: 1.8,
   },
+  // The one brush that ignores the pen entirely. Pressure is what makes the
+  // others feel like drawing tools, and is exactly what you do not want when
+  // you are lettering, ruling a box, or tracing something to a set weight —
+  // so this one is a plain round nib that comes out the width you asked for.
+  liner: {
+    id: 'liner',
+    label: 'Liner',
+    hint: 'Liner (6) — one even width, no pressure',
+    alpha: 1,
+    sizeScale: 1.15,
+  },
 };
 
-export const BRUSH_ORDER: BrushId[] = ['pen', 'pixel', 'marker', 'paint', 'chalk'];
+export const BRUSH_ORDER: BrushId[] = ['pen', 'pixel', 'marker', 'paint', 'chalk', 'liner'];
 
 export function isBrush(v: unknown): v is BrushId {
   return typeof v === 'string' && v in BRUSHES;

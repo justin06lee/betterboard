@@ -1,23 +1,41 @@
 :root {
   --bg: #15161a;
   --bar: rgba(24, 25, 30, 0.92);
+  --bar-solid: #1a1b21;
   --bar-border: #26272e;
   --fg: #e8eaed;
   --fg-dim: #9a9daa;
   --hover: #26272e;
   --active: #33353d;
+  --track: #34363f;
   --accent: #4cc9f0;
+  --shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
   --timeline-h: 68px;
+  /* Room the floating toolbar takes at each edge. JS writes these after it
+     measures the dock, and every other panel keeps clear of it by reading
+     them, so nothing has to know which side the toolbar is on. */
+  --pad-top: 0px;
+  --pad-right: 0px;
+  --pad-bottom: 0px;
+  --pad-left: 0px;
+  --safe-top: 8px;
+}
+
+body.mac {
+  --safe-top: 30px; /* clears the traffic lights on a frameless window */
 }
 
 body.light {
   --bg: #fafafa;
-  --bar: rgba(255, 255, 255, 0.92);
+  --bar: rgba(255, 255, 255, 0.94);
+  --bar-solid: #ffffff;
   --bar-border: #e2e2e6;
   --fg: #1e1e24;
   --fg-dim: #71727c;
   --hover: #ececf0;
   --active: #e2e2e8;
+  --track: #d8d8de;
+  --shadow: 0 10px 30px rgba(15, 15, 25, 0.16);
 }
 
 * {
@@ -35,55 +53,212 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
 }
 
-.topbar {
+/* ---- title strip ---- */
+
+/* The window's only drag handle now that the toolbar floats. It is invisible
+   everywhere but macOS, where the frameless window needs both the grab area
+   and the clearance for its traffic lights. */
+.titlebar {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  height: 48px;
-  display: flex;
+  height: 30px;
+  display: none;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 12px;
-  background: var(--bar);
-  border-bottom: 1px solid var(--bar-border);
-  z-index: 10;
-}
-
-/* frameless on macOS: clear the traffic lights and make the bar draggable */
-body.mac .topbar {
   padding-left: 86px;
+  z-index: 9;
   -webkit-app-region: drag;
 }
 
-.topbar button,
-.topbar input,
-.topbar label {
-  -webkit-app-region: no-drag;
+body.mac .titlebar {
+  display: flex;
 }
 
 .brand {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--fg-dim);
+  opacity: 0.75;
 }
 
-.topbar-left {
-  min-width: 90px;
-}
+/* ---- the dock: a floating toolbar that lives on any edge ---- */
 
-.topbar-center,
-.topbar-right {
+.dock {
+  position: fixed;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
+  padding: 5px;
+  background: var(--bar);
+  border: 1px solid var(--bar-border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  z-index: 14;
+  -webkit-app-region: no-drag;
+}
+
+.dock[data-side='top'],
+.dock[data-side='bottom'] {
+  flex-direction: row;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 28px);
+}
+
+.dock[data-side='left'],
+.dock[data-side='right'] {
+  flex-direction: column;
+  top: 50%;
+  transform: translateY(-50%);
+  max-height: calc(100vh - 28px);
+}
+
+.dock[data-side='top'] {
+  top: calc(var(--safe-top) + 8px);
+}
+
+.dock[data-side='bottom'] {
+  bottom: 14px;
+}
+
+body.timeline-open .dock[data-side='bottom'] {
+  bottom: calc(var(--timeline-h) + 14px);
+}
+
+.dock[data-side='left'] {
+  left: 14px;
+}
+
+.dock[data-side='right'] {
+  right: 14px;
+}
+
+/* The scrollable middle. Overflow is hidden rather than scrolled: when it no
+   longer fits, JS moves whole sections into the ⋯ menu instead. */
+.dock-main {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dock[data-side='left'] .dock-main,
+.dock[data-side='right'] .dock-main {
+  flex-direction: column;
+}
+
+.dock-sec {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.dock[data-side='left'] .dock-sec,
+.dock[data-side='right'] .dock-sec {
+  flex-direction: column;
+}
+
+/* Sections are separated by a hairline in the bar and by their name once they
+   drop into the overflow menu, where a row of icons on its own would be a
+   riddle. */
+.dock-sec + .dock-sec::before {
+  content: '';
+  width: 1px;
+  align-self: stretch;
+  margin: 5px 3px;
+  background: var(--bar-border);
+  flex: none;
+}
+
+.dock[data-side='left'] .dock-sec + .dock-sec::before,
+.dock[data-side='right'] .dock-sec + .dock-sec::before {
+  width: auto;
+  height: 1px;
+  margin: 3px 5px;
+}
+
+.dock-sec-label {
+  display: none;
 }
 
 .group {
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+.dock[data-side='left'] .group,
+.dock[data-side='right'] .group {
+  flex-direction: column;
+}
+
+.dock-grip {
+  flex: none;
+  width: 18px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-dim);
+  opacity: 0.5;
+  cursor: grab;
+  touch-action: none;
+}
+
+.dock[data-side='left'] .dock-grip,
+.dock[data-side='right'] .dock-grip {
+  width: 30px;
+  height: 18px;
+}
+
+.dock-grip svg {
+  width: 16px;
+  height: 16px;
+}
+
+.dock[data-side='left'] .dock-grip svg,
+.dock[data-side='right'] .dock-grip svg {
+  transform: rotate(90deg);
+}
+
+.dock-grip:hover {
+  opacity: 1;
+  background: var(--hover);
+}
+
+.dock.dragging,
+.dock.dragging .dock-grip {
+  cursor: grabbing;
+}
+
+.dock-more {
+  flex: none;
+}
+
+.dock-more.hidden {
+  display: none;
+}
+
+/* The edge a dropped toolbar would land on, previewed while it is dragged. */
+.dock-hint {
+  position: fixed;
+  background: var(--accent);
+  opacity: 0.22;
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 13;
+}
+
+.dock-hint.hidden {
+  display: none;
 }
 
 .sep {
@@ -125,102 +300,131 @@ body.mac .topbar {
   pointer-events: none;
 }
 
-.eraser-modes {
+/* ---- tool settings: a small strip parked against the dock ---- */
+
+/* Kept outside the dock rather than inside it, so the options for the live
+   tool stay visible at a glance whichever edge the toolbar is on, and never
+   have to be squeezed into a column. */
+.tool-settings {
+  position: fixed;
   display: flex;
-  height: 26px;
-  padding: 2px;
-  margin-left: 2px;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  background: var(--bar);
   border: 1px solid var(--bar-border);
-  border-radius: 7px;
-  background: var(--bg);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  z-index: 13;
 }
 
-.eraser-modes.hidden {
+.tool-settings.hidden {
   display: none;
 }
 
-.eraser-modes button {
-  padding: 0 7px;
+.modes {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--bg);
+}
+
+.modes.hidden {
+  display: none;
+}
+
+.modes button {
+  padding: 0 10px;
+  height: 100%;
   border: 0;
-  border-radius: 4px;
+  border-radius: 999px;
   background: transparent;
   color: var(--fg-dim);
   font: inherit;
-  font-size: 10px;
+  font-size: 10.5px;
   cursor: pointer;
 }
 
-.eraser-modes button:hover {
+.modes button:hover {
   color: var(--fg);
 }
 
-.eraser-modes button.active {
+.modes button.active {
   background: var(--active);
   color: var(--accent);
 }
 
-.wand-tolerance {
+.modes-slider {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 0 7px 0 9px;
+  gap: 7px;
+  padding: 0 10px 0 8px;
   border-left: 1px solid var(--bar-border);
-  margin-left: 4px;
+  margin-left: 2px;
 }
 
-.wand-tolerance input[type='range'] {
-  width: 64px;
-  accent-color: var(--accent);
+.modes-slider input[type='range'] {
+  width: 74px;
 }
 
-.wand-tolerance span {
+.modes-slider span {
   min-width: 20px;
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--fg-dim);
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
-.wand-actions {
+/* ---- floating action bars ---- */
+
+.floatbar {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: 14px;
+  bottom: calc(var(--pad-bottom) + 14px);
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 7px 10px 7px 14px;
   background: var(--bar);
   border: 1px solid var(--bar-border);
-  border-radius: 10px;
-  z-index: 11;
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  z-index: 12;
 }
 
-body.timeline-open .wand-actions {
-  bottom: calc(var(--timeline-h) + 14px);
+body.timeline-open .floatbar {
+  bottom: calc(var(--pad-bottom) + var(--timeline-h) + 14px);
 }
 
-.wand-actions.hidden {
+.floatbar.hidden {
   display: none;
 }
 
-.wand-hint {
+.floatbar-hint {
   font-size: 11px;
   color: var(--fg-dim);
   padding-right: 2px;
+  font-variant-numeric: tabular-nums;
 }
 
-.wand-actions button {
+.floatbar button {
   border: 1px solid var(--bar-border);
-  border-radius: 7px;
+  border-radius: 999px;
   background: var(--bg);
   color: var(--fg);
   font: inherit;
   font-size: 11.5px;
-  padding: 5px 10px;
+  padding: 5px 12px;
   cursor: pointer;
 }
 
-.wand-actions button:hover {
+.floatbar button:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -405,42 +609,81 @@ body.timeline-open .wand-actions {
   height: 20px;
   border-radius: 50%;
   border: 2px solid transparent;
-  outline: 1px solid var(--bar-border);
+  outline: 1px solid rgba(140, 142, 155, 0.4);
   cursor: pointer;
-  margin: 0 2px;
+  margin: 0 1px;
+  flex: none;
 }
 
 .swatch.active {
-  border-color: var(--bg);
+  border-color: var(--bar-solid);
   outline: 2px solid var(--accent);
 }
 
-.color-well {
-  position: relative;
-  width: 20px;
-  height: 20px;
-  margin-left: 4px;
+.caret {
+  width: 16px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  flex: none;
+}
+
+.caret svg {
+  width: 14px;
+  height: 14px;
+}
+
+.caret:hover,
+.caret.on {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+/* Chips are the two controls that carry a value rather than a state: they
+   show it in the bar and open the real control when clicked. */
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--bar-border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  flex: none;
+}
+
+.chip:hover,
+.chip.on {
+  border-color: var(--accent);
+}
+
+.chip-label {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 30px;
+  text-align: left;
+}
+
+.color-chip {
+  padding: 0 5px;
+}
+
+.chip-dot {
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
-  overflow: hidden;
-  outline: 1px solid var(--bar-border);
-  cursor: pointer;
-  background: conic-gradient(#ef476f, #ffb703, #06d6a0, #4cc9f0, #a78bfa, #ef476f);
-}
-
-.color-well input {
-  position: absolute;
-  inset: -8px;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.size-group {
-  gap: 8px;
-}
-
-.size-group input[type='range'] {
-  width: 90px;
-  accent-color: var(--accent);
+  outline: 1px solid rgba(140, 142, 155, 0.4);
+  background: var(--fg);
 }
 
 .size-preview {
@@ -448,6 +691,7 @@ body.timeline-open .wand-actions {
   height: 20px;
   display: grid;
   place-items: center;
+  flex: none;
 }
 
 #size-dot {
@@ -457,29 +701,28 @@ body.timeline-open .wand-actions {
   height: 5px;
 }
 
+/* The board fills the window now that the toolbar floats over it. */
 #board {
   position: fixed;
-  top: 48px;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  inset: 0;
   width: 100%;
-  height: calc(100% - 48px);
+  height: 100%;
   touch-action: none;
 }
 
-/* The timeline takes real estate rather than floating over the drawing. */
+/* The timeline still takes real estate rather than floating over the drawing. */
 body.timeline-open #board {
   bottom: var(--timeline-h);
-  height: calc(100% - 48px - var(--timeline-h));
+  height: calc(100% - var(--timeline-h));
 }
 
 body.timeline-open .zoom-pill {
-  bottom: calc(var(--timeline-h) + 14px);
+  bottom: calc(var(--pad-bottom) + var(--timeline-h) + 14px);
 }
 
-body.timeline-open .layers {
-  max-height: calc(100% - 132px - var(--timeline-h));
+body.timeline-open .layers,
+body.timeline-open .stickers {
+  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px - var(--timeline-h));
 }
 
 /* ---- timeline ---- */
@@ -607,7 +850,7 @@ body.timeline-open .layers {
 
 .onion-panel {
   position: fixed;
-  left: 12px;
+  left: calc(var(--pad-left) + 12px);
   bottom: calc(var(--timeline-h) + 8px);
   width: 240px;
   padding: 10px 12px;
@@ -672,10 +915,10 @@ body.timeline-open .layers {
 
 .ask {
   position: fixed;
-  top: 60px;
-  left: 12px;
+  top: calc(var(--pad-top) + var(--safe-top) + 12px);
+  left: calc(var(--pad-left) + 12px);
   width: 300px;
-  max-height: calc(100% - 132px);
+  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px);
   display: flex;
   flex-direction: column;
   background: var(--bar);
@@ -687,7 +930,7 @@ body.timeline-open .layers {
 }
 
 body.timeline-open .ask {
-  max-height: calc(100% - 132px - var(--timeline-h));
+  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px - var(--timeline-h));
 }
 
 .ask.hidden {
@@ -917,10 +1160,10 @@ body.timeline-open .ask {
 
 .layers {
   position: fixed;
-  top: 60px;
-  right: 12px;
+  top: calc(var(--pad-top) + var(--safe-top) + 12px);
+  right: calc(var(--pad-right) + 12px);
   width: 208px;
-  max-height: calc(100% - 132px);
+  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px);
   display: flex;
   flex-direction: column;
   background: var(--bar);
@@ -1105,7 +1348,7 @@ input.layer-name {
 .rot-wheel {
   position: fixed;
   left: 50%;
-  top: calc(50% + 24px); /* center of the canvas area below the 48px topbar */
+  top: 50%;
   width: 160px;
   height: 160px;
   margin: -80px 0 0 -80px;
@@ -1151,8 +1394,8 @@ input.layer-name {
 
 .zoom-pill {
   position: fixed;
-  right: 14px;
-  bottom: 14px;
+  right: calc(var(--pad-right) + 14px);
+  bottom: calc(var(--pad-bottom) + 14px);
   display: flex;
   align-items: center;
   background: var(--bar);
@@ -1201,5 +1444,601 @@ input.layer-name {
   50% {
     background: var(--active);
     transform: scale(1.15);
+  }
+}
+
+/* ---- sliders ------------------------------------------------------------ */
+
+/* One look for every slider in the app. The filled part of the track is a
+   gradient stop rather than a second element, and JS keeps `--pct` in step
+   with the value — Chromium has no ::-webkit-slider-progress to lean on. */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0 var(--pct, 50%),
+    var(--track) var(--pct, 50%) 100%
+  );
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: var(--bar-solid);
+  border: 2px solid var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  transition: transform 0.12s ease;
+}
+
+input[type='range']:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+
+input[type='range']:active::-webkit-slider-thumb {
+  transform: scale(1.25);
+}
+
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input[type='range'].rainbow::-webkit-slider-runnable-track {
+  background: linear-gradient(
+    to right,
+    #ff0000,
+    #ffff00,
+    #00ff00,
+    #00ffff,
+    #0000ff,
+    #ff00ff,
+    #ff0000
+  );
+}
+
+input[type='range'].rainbow::-webkit-slider-thumb {
+  border-color: #ffffff;
+  background: transparent;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45), 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+/* ---- popovers ----------------------------------------------------------- */
+
+/* The scrim is the whole point of the popovers being toggles: it eats the
+   click that dismisses one, so closing the colour picker never leaves a dot
+   on the board underneath it. */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+}
+
+.scrim.hidden {
+  display: none;
+}
+
+.pop {
+  position: fixed;
+  z-index: 16;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bar);
+  border: 1px solid var(--bar-border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+}
+
+.pop.hidden {
+  display: none;
+}
+
+.pop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.pop-value {
+  font-size: 12px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.pop-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pop-hint {
+  font-size: 10.5px;
+  color: var(--fg-dim);
+}
+
+.pop-ghost {
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 10.5px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.pop-ghost:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+/* Sections that fell out of the toolbar. Here they get the names they do not
+   need when their icons sit in a row you already understand. */
+.pop-overflow {
+  gap: 4px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+.pop-overflow .dock-sec {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 2px 2px 4px;
+}
+
+.pop-overflow .dock-sec + .dock-sec::before {
+  display: none;
+}
+
+.pop-overflow .dock-sec-label {
+  display: block;
+  width: 62px;
+  flex: none;
+  font-size: 10.5px;
+  color: var(--fg-dim);
+}
+
+.pop-overflow .group {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+/* ---- colour picker ------------------------------------------------------ */
+
+.pop-color {
+  width: 276px;
+}
+
+.cp-sv {
+  width: 252px;
+  height: 150px;
+  border-radius: 10px;
+  cursor: crosshair;
+  touch-action: none;
+  display: block;
+}
+
+.cp-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cp-eyedrop {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.cp-eyedrop svg {
+  width: 16px;
+  height: 16px;
+}
+
+.cp-eyedrop:hover,
+.cp-eyedrop.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.cp-preview {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 8px;
+  outline: 1px solid var(--bar-border);
+  background: var(--fg);
+}
+
+.cp-fields {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr 1fr 1fr;
+  gap: 6px;
+}
+
+.cp-fields label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  height: 28px;
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.cp-fields label:focus-within {
+  border-color: var(--accent);
+}
+
+.cp-fields span {
+  font-size: 10px;
+  color: var(--fg-dim);
+  flex: none;
+}
+
+.cp-fields input {
+  width: 100%;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+  -moz-appearance: textfield;
+}
+
+.cp-fields input::-webkit-outer-spin-button,
+.cp-fields input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.cp-hexfield {
+  order: -1;
+}
+
+.cp-recent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  margin-bottom: -4px;
+}
+
+.cp-recent {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+}
+
+.cp-recent button {
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  outline: 1px solid var(--bar-border);
+  cursor: pointer;
+  padding: 0;
+}
+
+.cp-recent button.active {
+  border-color: var(--bar-solid);
+  outline: 2px solid var(--accent);
+}
+
+.pop-recent {
+  width: 200px;
+}
+
+.pop-recent .pop-hint:only-of-type {
+  margin: 0;
+}
+
+.cp-recent:empty + .pop-hint {
+  display: block;
+}
+
+.cp-recent:not(:empty) + .pop-hint {
+  display: none;
+}
+
+/* ---- size popover ------------------------------------------------------- */
+
+.pop-size {
+  width: 268px;
+}
+
+.size-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.size-row input[type='number'] {
+  width: 52px;
+  flex: none;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  outline: none;
+}
+
+.size-row input[type='number']:focus {
+  border-color: var(--accent);
+}
+
+/* A real board in miniature: it draws with the live brush at the live size, so
+   the number in the slider stops being an abstraction. */
+.size-pad {
+  width: 244px;
+  height: 118px;
+  border-radius: 10px;
+  border: 1px dashed var(--bar-border);
+  background: var(--bg);
+  cursor: crosshair;
+  touch-action: none;
+  display: block;
+}
+
+/* ---- stickers ----------------------------------------------------------- */
+
+.stickers {
+  position: fixed;
+  top: calc(var(--pad-top) + var(--safe-top) + 12px);
+  right: calc(var(--pad-right) + 12px);
+  width: 224px;
+  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bar);
+  border: 1px solid var(--bar-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  z-index: 12;
+  overflow: hidden;
+}
+
+/* Both right-hand panels can be open at once, so the second one steps down. */
+body.layers-open .stickers {
+  top: auto;
+  bottom: calc(var(--pad-bottom) + 58px); /* clears the zoom pill */
+  max-height: 44%;
+}
+
+body.layers-open.timeline-open .stickers {
+  bottom: calc(var(--pad-bottom) + var(--timeline-h) + 58px);
+}
+
+.stickers.hidden {
+  display: none;
+}
+
+.stickers-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid var(--bar-border);
+}
+
+.stickers-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.sticker-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px;
+  overflow-y: auto;
+}
+
+.sticker {
+  position: relative;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  border: 1px solid var(--bar-border);
+  border-radius: 10px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.sticker:hover {
+  border-color: var(--accent);
+}
+
+.sticker img {
+  max-width: 100%;
+  max-height: 100%;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.sticker-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 3px 6px;
+  font-size: 9.5px;
+  color: var(--fg-dim);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: linear-gradient(to top, var(--bg) 55%, transparent);
+  border-radius: 0 0 9px 9px;
+}
+
+.sticker-del {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  display: none;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--active);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.sticker-del svg {
+  width: 11px;
+  height: 11px;
+}
+
+.sticker:hover .sticker-del {
+  display: grid;
+}
+
+.sticker-del:hover {
+  color: #ff6b6b;
+}
+
+.stickers-empty {
+  padding: 4px 14px 16px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+}
+
+.stickers-empty.hidden {
+  display: none;
+}
+
+/* ---- colour loupe ------------------------------------------------------- */
+
+/* Follows the pointer while the picker is live: a hard-edged magnification of
+   the board with the pixel under the crosshair called out, because picking a
+   colour by eye at 1:1 is guesswork. */
+.loupe {
+  position: fixed;
+  z-index: 18;
+  width: 132px;
+  padding: 6px;
+  background: var(--bar-solid);
+  border: 1px solid var(--bar-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+
+.loupe.hidden {
+  display: none;
+}
+
+.loupe-canvas {
+  width: 120px;
+  height: 120px;
+  display: block;
+  border-radius: 8px;
+  image-rendering: pixelated;
+}
+
+.loupe-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 2px 1px;
+}
+
+.loupe-swatch {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border-radius: 4px;
+  outline: 1px solid var(--bar-border);
+}
+
+#loupe-hex {
+  font-size: 11px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* ---- toast -------------------------------------------------------------- */
+
+/* Along the bottom, clear of the selection bar that shares that edge. The top
+   belongs to the toolbar and its settings strip, which is exactly where a
+   message would be most in the way. */
+.toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--pad-bottom) + 68px);
+  padding: 8px 14px;
+  max-width: 60vw;
+  background: var(--bar);
+  border: 1px solid var(--bar-border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  font-size: 11.5px;
+  color: var(--fg);
+  z-index: 30;
+  pointer-events: none;
+  animation: toast-in 0.18s ease;
+}
+
+.toast.hidden {
+  display: none;
+}
+
+body.timeline-open .toast {
+  bottom: calc(var(--pad-bottom) + var(--timeline-h) + 68px);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
   }
 }

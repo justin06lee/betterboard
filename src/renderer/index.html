@@ -7,103 +7,218 @@
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="topbar-left">
-      <span class="brand">betterboard</span>
-    </div>
-
-    <div class="topbar-center">
-      <div class="group">
-        <button id="tool-pen" class="tool brush" title="Pen (1) — pressure-tapered ink">
-          <svg viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L15.8 5.2a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8.2 18.8 4 20z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M13.5 7.5l3 3" stroke="currentColor" stroke-width="1.8"/></svg>
-        </button>
-        <button id="brush-pixel" class="tool brush" title="Pixel (2) — snaps to a shared grid; size sets the pixel">
-          <svg viewBox="0 0 24 24"><g fill="currentColor"><rect x="4" y="14" width="4" height="4"/><rect x="8" y="10" width="4" height="4"/><rect x="12" y="10" width="4" height="4"/><rect x="16" y="6" width="4" height="4"/></g><path d="M4 18h4v-4h4v-4h4V6h4" fill="none" stroke="currentColor" stroke-width="0"/></svg>
-        </button>
-        <button id="brush-marker" class="tool brush" title="Marker (3) — flat chisel tip, translucent">
-          <svg viewBox="0 0 24 24"><path d="M14.6 3.8l5.6 5.6-8.4 8.4-5.6-5.6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M6.2 12.2L3.4 18l2.8 2.8L12 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4 21h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-        </button>
-        <button id="brush-paint" class="tool brush" title="Paint (4) — dry bristle brush that streaks">
-          <svg viewBox="0 0 24 24"><path d="M17.6 3.6a2 2 0 0 1 2.8 2.8l-7.1 7.1-2.8-2.8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9.4 12.4c-1.6.5-2.4 1.7-2.6 3.2-.2 1.6-.9 2.3-2.8 2.6 1 1.4 2.6 2.2 4.3 2 2.2-.3 3.6-2 3.5-4a3 3 0 0 0-2.4-3.8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-        </button>
-        <button id="brush-chalk" class="tool brush" title="Chalk (5) — dry and grainy, with dusty edges">
-          <svg viewBox="0 0 24 24"><path d="M17.6 3.3a1.4 1.4 0 0 1 2 0l1.1 1.1a1.4 1.4 0 0 1 0 2l-5.4 5.4-3.1-3.1z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><g fill="currentColor"><circle cx="11.4" cy="13.2" r="1.35"/><circle cx="8.3" cy="16.3" r="1.15"/><circle cx="5.3" cy="19.3" r="0.95"/><circle cx="12.6" cy="16.8" r="0.75"/><circle cx="8.9" cy="12.5" r="0.7"/><circle cx="5.6" cy="15.4" r="0.65"/><circle cx="9.8" cy="20.2" r="0.7"/><circle cx="4.3" cy="12.6" r="0.55"/></g></svg>
-        </button>
-
-        <div class="sep"></div>
-
-        <button id="tool-eraser" class="tool" title="Eraser (E)">
-          <svg viewBox="0 0 24 24"><path d="M8.5 18.5H19M4.6 14.6a2 2 0 0 1 0-2.8l7-7a2 2 0 0 1 2.8 0l4.8 4.8a2 2 0 0 1 0 2.8l-6.1 6.1H9.5l-4.9-3.9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 8.6l7.4 7.4" stroke="currentColor" stroke-width="1.8"/></svg>
-        </button>
-        <div id="eraser-modes" class="eraser-modes hidden" role="group" aria-label="Eraser mode">
-          <button type="button" data-eraser-mode="stroke" title="Remove whole strokes">Stroke</button>
-          <button type="button" data-eraser-mode="area" title="Erase ink and image pixels under the eraser circle">Area</button>
-        </div>
-        <button id="tool-select" class="tool" title="Select (S) — lasso an area, then drag it. ⌫ deletes, Esc deselects">
-          <svg viewBox="0 0 24 24"><path d="M12 3.6c4.4 0 8 2.5 8 5.6s-3.6 5.6-8 5.6-8-2.5-8-5.6 3.6-5.6 8-5.6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.6 2.8" stroke-linecap="round"/><path d="M8.2 14.2c-.9 1.6-.7 3 .4 3.7a1.7 1.7 0 1 1-1.6 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        </button>
-        <button id="tool-wand" class="tool" title="Magic wand (W) — click a picture to select its color region">
-          <svg viewBox="0 0 24 24"><path d="M4.5 19.5l8.3-8.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15 5.6l1 2.4 2.4 1-2.4 1-1 2.4-1-2.4-2.4-1 2.4-1z" fill="currentColor"/><path d="M20 12.8l.55 1.3 1.3.55-1.3.55-.55 1.3-.55-1.3-1.3-.55 1.3-.55z" fill="currentColor"/><path d="M9.6 3.4l.5 1.2 1.2.5-1.2.5-.5 1.2-.5-1.2-1.2-.5 1.2-.5z" fill="currentColor"/></svg>
-        </button>
-        <div id="wand-modes" class="eraser-modes hidden" role="group" aria-label="Magic wand mode">
-          <button type="button" data-wand-mode="point" title="Select the color region under the click">Point</button>
-          <button type="button" data-wand-mode="background" title="Click a picture to select its whole background">Background</button>
-          <label class="wand-tolerance" title="Tolerance — how far a color may drift and still be selected">
-            <input type="range" id="wand-tolerance" min="0" max="120" step="1" value="32" />
-            <span id="wand-tolerance-val">32</span>
-          </label>
-        </div>
-        <button id="tool-ask" class="tool" title="Ask / Draw (A) — box a region to discuss or annotate it">
-          <svg viewBox="0 0 24 24"><path d="M20 12.6A7.4 7.4 0 0 1 12.6 20H5.2A1.2 1.2 0 0 1 4 18.8v-7.4A7.4 7.4 0 0 1 11.4 4h1.2A7.4 7.4 0 0 1 20 11.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 10.2a2.1 2.1 0 1 1 2.6 2.5v1.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12.5" cy="16.4" r="0.9" fill="currentColor"/></svg>
-        </button>
-        <button id="tool-hand" class="tool" title="Hand — pan (H or Space)">
-          <svg viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V10m0-4.5a1.5 1.5 0 0 1 3 0V11m0-3.5a1.5 1.5 0 0 1 3 0V14a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-2.7l-2.4-3.6a1.5 1.5 0 0 1 2.4-1.8L7 14V7a1.5 1.5 0 0 1 3 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-      </div>
-
-      <div class="sep"></div>
-
-      <div class="group" id="swatches"></div>
-      <label class="color-well" title="Custom color">
-        <input type="color" id="color-input" value="#e8eaed" />
-      </label>
-
-      <div class="sep"></div>
-
-      <div class="group size-group" title="Stroke size ( [ and ] )">
-        <input type="range" id="size-input" min="1" max="28" step="1" value="6" />
-        <span class="size-preview"><span id="size-dot"></span></span>
-      </div>
-    </div>
-
-    <div class="topbar-right">
-      <div class="group">
-        <button id="undo" class="tool" title="Undo (⌘Z)" disabled>
-          <svg viewBox="0 0 24 24"><path d="M8.5 7L4.5 11l4 4M5 11h9a5 5 0 0 1 0 10h-3" transform="translate(0 -2.5)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-        <button id="redo" class="tool" title="Redo (⇧⌘Z)" disabled>
-          <svg viewBox="0 0 24 24"><path d="M15.5 7l4 4-4 4M19 11h-9a5 5 0 0 0 0 10h3" transform="translate(0 -2.5)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-      </div>
-      <div class="sep"></div>
-      <div class="group">
-        <button id="grid-btn" class="tool" title="Dot grid (⌘G)">
-          <svg viewBox="0 0 24 24"><g fill="currentColor"><circle cx="6" cy="6" r="1.4"/><circle cx="12" cy="6" r="1.4"/><circle cx="18" cy="6" r="1.4"/><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/><circle cx="6" cy="18" r="1.4"/><circle cx="12" cy="18" r="1.4"/><circle cx="18" cy="18" r="1.4"/></g></svg>
-        </button>
-        <button id="theme-btn" class="tool" title="Light/dark board (⇧⌘L)">
-          <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-        </button>
-        <button id="timeline-btn" class="tool" title="Animation timeline (T)">
-          <svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="1.7"/></svg>
-        </button>
-        <button id="layers-btn" class="tool" title="Layers (L or ⌘L)">
-          <svg viewBox="0 0 24 24"><path d="M12 3.5l8.5 4.3-8.5 4.3-8.5-4.3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4.4 12.2L12 16l7.6-3.8M4.4 16.2L12 20l7.6-3.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-      </div>
-    </div>
-  </header>
-
   <canvas id="board"></canvas>
+
+  <!-- A slim strip along the top: on macOS it clears the traffic lights and
+       gives the frameless window something to be dragged by. -->
+  <div id="titlebar" class="titlebar"><span class="brand">betterboard</span></div>
+
+  <!-- Swallows the click that dismisses a popover, so closing one never lands
+       a dot on the board underneath. -->
+  <div id="scrim" class="scrim hidden"></div>
+
+  <div id="dock" class="dock" data-side="top">
+    <button id="dock-grip" class="dock-grip" title="Drag to move the toolbar to any edge">
+      <svg viewBox="0 0 24 24"><g fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></g></svg>
+    </button>
+
+    <div id="dock-main" class="dock-main">
+      <div class="dock-sec" data-sec="brushes" data-label="Brushes">
+        <span class="dock-sec-label">Brushes</span>
+        <div class="group">
+          <button id="tool-pen" class="tool brush" title="Pen (1) — pressure-tapered ink">
+            <svg viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L15.8 5.2a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8.2 18.8 4 20z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M13.5 7.5l3 3" stroke="currentColor" stroke-width="1.8"/></svg>
+          </button>
+          <button id="brush-pixel" class="tool brush" title="Pixel (2) — snaps to a shared grid; size sets the pixel">
+            <svg viewBox="0 0 24 24"><g fill="currentColor"><rect x="4" y="14" width="4" height="4"/><rect x="8" y="10" width="4" height="4"/><rect x="12" y="10" width="4" height="4"/><rect x="16" y="6" width="4" height="4"/></g></svg>
+          </button>
+          <button id="brush-marker" class="tool brush" title="Marker (3) — flat chisel tip, translucent">
+            <svg viewBox="0 0 24 24"><path d="M14.6 3.8l5.6 5.6-8.4 8.4-5.6-5.6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M6.2 12.2L3.4 18l2.8 2.8L12 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4 21h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          </button>
+          <button id="brush-paint" class="tool brush" title="Paint (4) — dry bristle brush that streaks">
+            <svg viewBox="0 0 24 24"><path d="M17.6 3.6a2 2 0 0 1 2.8 2.8l-7.1 7.1-2.8-2.8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9.4 12.4c-1.6.5-2.4 1.7-2.6 3.2-.2 1.6-.9 2.3-2.8 2.6 1 1.4 2.6 2.2 4.3 2 2.2-.3 3.6-2 3.5-4a3 3 0 0 0-2.4-3.8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+          </button>
+          <button id="brush-chalk" class="tool brush" title="Chalk (5) — dry and grainy, with dusty edges">
+            <svg viewBox="0 0 24 24"><path d="M17.6 3.3a1.4 1.4 0 0 1 2 0l1.1 1.1a1.4 1.4 0 0 1 0 2l-5.4 5.4-3.1-3.1z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><g fill="currentColor"><circle cx="11.4" cy="13.2" r="1.35"/><circle cx="8.3" cy="16.3" r="1.15"/><circle cx="5.3" cy="19.3" r="0.95"/><circle cx="12.6" cy="16.8" r="0.75"/><circle cx="8.9" cy="12.5" r="0.7"/><circle cx="5.6" cy="15.4" r="0.65"/><circle cx="9.8" cy="20.2" r="0.7"/><circle cx="4.3" cy="12.6" r="0.55"/></g></svg>
+          </button>
+          <button id="brush-liner" class="tool brush" title="Liner (6) — one even width, no pressure">
+            <svg viewBox="0 0 24 24"><path d="M5.4 18.6L18.6 5.4" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round"/><path d="M2.9 16.1l5 5M16.1 2.9l5 5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.6"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="dock-sec" data-sec="tools" data-label="Tools">
+        <span class="dock-sec-label">Tools</span>
+        <div class="group">
+          <button id="tool-eraser" class="tool" title="Eraser (E)">
+            <svg viewBox="0 0 24 24"><path d="M8.5 18.5H19M4.6 14.6a2 2 0 0 1 0-2.8l7-7a2 2 0 0 1 2.8 0l4.8 4.8a2 2 0 0 1 0 2.8l-6.1 6.1H9.5l-4.9-3.9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 8.6l7.4 7.4" stroke="currentColor" stroke-width="1.8"/></svg>
+          </button>
+          <button id="tool-fill" class="tool" title="Fill (F) — click a closed shape to flood it with the current colour">
+            <svg viewBox="0 0 24 24"><path d="M11 3.2l8.4 8.4-6.9 6.9a1.6 1.6 0 0 1-2.3 0L4.5 12.8a1.6 1.6 0 0 1 0-2.3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8.2 6l3 3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M5.1 12.2h13.1" stroke="currentColor" stroke-width="1.4" opacity="0.6"/><path d="M20.2 15.4c1 1.5 1.6 2.4 1.6 3.1a1.6 1.6 0 0 1-3.2 0c0-.7.6-1.6 1.6-3.1z" fill="currentColor"/></svg>
+          </button>
+          <button id="tool-select" class="tool" title="Select (S) — lasso an area, then drag it. ⌘C copies, ⌘D duplicates, ⌫ deletes">
+            <svg viewBox="0 0 24 24"><path d="M12 3.6c4.4 0 8 2.5 8 5.6s-3.6 5.6-8 5.6-8-2.5-8-5.6 3.6-5.6 8-5.6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.6 2.8" stroke-linecap="round"/><path d="M8.2 14.2c-.9 1.6-.7 3 .4 3.7a1.7 1.7 0 1 1-1.6 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+          <button id="tool-wand" class="tool" title="Magic wand (W) — click a picture to select its color region">
+            <svg viewBox="0 0 24 24"><path d="M4.5 19.5l8.3-8.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15 5.6l1 2.4 2.4 1-2.4 1-1 2.4-1-2.4-2.4-1 2.4-1z" fill="currentColor"/><path d="M20 12.8l.55 1.3 1.3.55-1.3.55-.55 1.3-.55-1.3-1.3-.55 1.3-.55z" fill="currentColor"/><path d="M9.6 3.4l.5 1.2 1.2.5-1.2.5-.5 1.2-.5-1.2-1.2-.5 1.2-.5z" fill="currentColor"/></svg>
+          </button>
+          <button id="tool-picker" class="tool" title="Colour picker (I, or hold I) — magnifies the board so you can take the exact pixel">
+            <svg viewBox="0 0 24 24"><path d="M16.4 3.6a2.2 2.2 0 0 1 3.1 0l.9.9a2.2 2.2 0 0 1 0 3.1l-2.3 2.3-4-4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14.1 5.9l4 4-8.3 8.3-2.6.6a1.6 1.6 0 0 1-1.9-1.9l.6-2.6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+          </button>
+          <button id="tool-ask" class="tool" title="Ask / Draw (A) — box a region to discuss or annotate it">
+            <svg viewBox="0 0 24 24"><path d="M20 12.6A7.4 7.4 0 0 1 12.6 20H5.2A1.2 1.2 0 0 1 4 18.8v-7.4A7.4 7.4 0 0 1 11.4 4h1.2A7.4 7.4 0 0 1 20 11.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 10.2a2.1 2.1 0 1 1 2.6 2.5v1.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12.5" cy="16.4" r="0.9" fill="currentColor"/></svg>
+          </button>
+          <button id="tool-hand" class="tool" title="Hand — pan (H or Space)">
+            <svg viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V10m0-4.5a1.5 1.5 0 0 1 3 0V11m0-3.5a1.5 1.5 0 0 1 3 0V14a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-2.7l-2.4-3.6a1.5 1.5 0 0 1 2.4-1.8L7 14V7a1.5 1.5 0 0 1 3 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="dock-sec" data-sec="color" data-label="Colour">
+        <span class="dock-sec-label">Colour</span>
+        <div class="group color-group">
+          <div class="group" id="swatches"></div>
+          <button id="recent-btn" class="caret" title="Recently used colours">
+            <svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button id="color-chip" class="chip color-chip" title="Colour — click to open the picker">
+            <span id="color-chip-dot" class="chip-dot"></span>
+          </button>
+        </div>
+      </div>
+
+      <div class="dock-sec" data-sec="size" data-label="Size">
+        <span class="dock-sec-label">Size</span>
+        <div class="group">
+          <button id="size-chip" class="chip size-chip" title="Brush size ( [ and ] ) — click for the slider and a scratch pad">
+            <span class="size-preview"><span id="size-dot"></span></span>
+            <span id="size-chip-label" class="chip-label">6&thinsp;px</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="dock-sec" data-sec="history" data-label="History">
+        <span class="dock-sec-label">History</span>
+        <div class="group">
+          <button id="undo" class="tool" title="Undo (⌘Z)" disabled>
+            <svg viewBox="0 0 24 24"><path d="M8.5 7L4.5 11l4 4M5 11h9a5 5 0 0 1 0 10h-3" transform="translate(0 -2.5)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button id="redo" class="tool" title="Redo (⇧⌘Z)" disabled>
+            <svg viewBox="0 0 24 24"><path d="M15.5 7l4 4-4 4M19 11h-9a5 5 0 0 0 0 10h3" transform="translate(0 -2.5)" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="dock-sec" data-sec="view" data-label="Board">
+        <span class="dock-sec-label">Board</span>
+        <div class="group">
+          <button id="grid-btn" class="tool" title="Dot grid (⌘G)">
+            <svg viewBox="0 0 24 24"><g fill="currentColor"><circle cx="6" cy="6" r="1.4"/><circle cx="12" cy="6" r="1.4"/><circle cx="18" cy="6" r="1.4"/><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/><circle cx="6" cy="18" r="1.4"/><circle cx="12" cy="18" r="1.4"/><circle cx="18" cy="18" r="1.4"/></g></svg>
+          </button>
+          <button id="theme-btn" class="tool" title="Light/dark board (⇧⌘L)">
+            <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+          </button>
+          <button id="stickers-btn" class="tool" title="Stickers (⌥⌘S) — your saved cut-outs">
+            <svg viewBox="0 0 24 24"><path d="M4.6 5.6a2 2 0 0 1 2-2h10.8a2 2 0 0 1 2 2v7.2l-6.6 6.6H6.6a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M19.4 12.8h-4.4a2 2 0 0 0-2 2v4.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+          </button>
+          <button id="timeline-btn" class="tool" title="Animation timeline (T)">
+            <svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="1.7"/></svg>
+          </button>
+          <button id="layers-btn" class="tool" title="Layers (L or ⌘L)">
+            <svg viewBox="0 0 24 24"><path d="M12 3.5l8.5 4.3-8.5 4.3-8.5-4.3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4.4 12.2L12 16l7.6-3.8M4.4 16.2L12 20l7.6-3.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <button id="dock-more" class="tool dock-more hidden" title="Everything that did not fit">
+      <svg viewBox="0 0 24 24"><g fill="currentColor"><circle cx="5.5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="18.5" cy="12" r="1.7"/></g></svg>
+    </button>
+  </div>
+
+  <div id="dock-overflow" class="pop pop-overflow hidden"></div>
+
+  <!-- Settings for whichever tool is live, parked against the dock so they are
+       never in the way and never have to fit inside it. -->
+  <div id="tool-settings" class="tool-settings hidden">
+    <div id="eraser-modes" class="modes hidden" role="group" aria-label="Eraser mode">
+      <button type="button" data-eraser-mode="stroke" title="Remove whole strokes">Stroke</button>
+      <button type="button" data-eraser-mode="area" title="Erase ink and image pixels under the eraser circle">Area</button>
+    </div>
+    <div id="wand-modes" class="modes hidden" role="group" aria-label="Magic wand mode">
+      <button type="button" data-wand-mode="point" title="Select the color region under the click">Point</button>
+      <button type="button" data-wand-mode="background" title="Click a picture to select its whole background">Background</button>
+      <label class="modes-slider" title="Tolerance — how far a color may drift and still be selected">
+        <input type="range" id="wand-tolerance" min="0" max="120" step="1" value="32" />
+        <span id="wand-tolerance-val">32</span>
+      </label>
+    </div>
+    <div id="fill-modes" class="modes hidden" role="group" aria-label="Fill mode">
+      <button type="button" data-fill-mode="region" title="Fill the closed area under the click">Area</button>
+      <button type="button" data-fill-mode="similar" title="Fill every matching colour in view, connected or not">Similar</button>
+      <label class="modes-slider" title="Tolerance — how far a colour may drift and still be filled">
+        <input type="range" id="fill-tolerance" min="0" max="120" step="1" value="26" />
+        <span id="fill-tolerance-val">26</span>
+      </label>
+    </div>
+  </div>
+
+  <div id="color-pop" class="pop pop-color hidden" role="dialog" aria-label="Colour">
+    <canvas id="cp-sv" class="cp-sv" width="252" height="150"></canvas>
+    <div class="cp-controls">
+      <button id="cp-pick" class="cp-eyedrop" title="Take a colour off the board (I)">
+        <svg viewBox="0 0 24 24"><path d="M16.4 3.6a2.2 2.2 0 0 1 3.1 0l.9.9a2.2 2.2 0 0 1 0 3.1l-2.3 2.3-4-4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14.1 5.9l4 4-8.3 8.3-2.6.6a1.6 1.6 0 0 1-1.9-1.9l.6-2.6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+      </button>
+      <input type="range" id="cp-hue" class="cp-hue rainbow" min="0" max="359" step="1" value="0" aria-label="Hue" />
+      <span id="cp-preview" class="cp-preview"></span>
+    </div>
+    <div class="cp-fields">
+      <label class="cp-hexfield"><span>#</span><input type="text" id="cp-hex" maxlength="7" spellcheck="false" autocomplete="off" /></label>
+      <label><input type="number" id="cp-r" min="0" max="255" step="1" /><span>R</span></label>
+      <label><input type="number" id="cp-g" min="0" max="255" step="1" /><span>G</span></label>
+      <label><input type="number" id="cp-b" min="0" max="255" step="1" /><span>B</span></label>
+    </div>
+    <div class="cp-recent-head"><span>Recent</span><button type="button" id="cp-recent-clear" class="pop-ghost">Clear</button></div>
+    <div id="cp-recent" class="cp-recent"></div>
+  </div>
+
+  <div id="recent-pop" class="pop pop-recent hidden" role="dialog" aria-label="Recent colours">
+    <div class="pop-head"><span>Recently used</span></div>
+    <div id="recent-grid" class="cp-recent"></div>
+    <p class="pop-hint" id="recent-empty">Colours you draw with land here.</p>
+  </div>
+
+  <div id="size-pop" class="pop pop-size hidden" role="dialog" aria-label="Brush size">
+    <div class="pop-head"><span>Brush size</span><span id="size-readout" class="pop-value">6 px</span></div>
+    <div class="size-row">
+      <input type="range" id="size-input" min="1" max="28" step="1" value="6" />
+      <input type="number" id="size-number" min="1" max="28" step="1" value="6" />
+    </div>
+    <canvas id="size-pad" class="size-pad"></canvas>
+    <div class="pop-foot">
+      <span class="pop-hint">Scribble here to try it at real size.</span>
+      <button type="button" id="size-pad-clear" class="pop-ghost">Clear</button>
+    </div>
+  </div>
+
+  <div id="loupe" class="loupe hidden">
+    <canvas id="loupe-canvas" class="loupe-canvas"></canvas>
+    <div class="loupe-foot"><span id="loupe-swatch" class="loupe-swatch"></span><span id="loupe-hex">#000000</span></div>
+  </div>
+
+  <aside id="stickers" class="stickers hidden">
+    <header class="stickers-head">
+      <span class="stickers-title">Stickers</span>
+      <button id="sticker-add" class="mini" title="Save the current selection as a sticker (⇧⌘D)">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <button id="stickers-close" class="mini" title="Close (⌥⌘S)">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div id="sticker-list" class="sticker-list"></div>
+    <p class="stickers-empty" id="stickers-empty">Lasso part of your drawing with the select tool, then press <b>+</b>. Stickers are kept for every board — click one to stamp it down, or drag it where you want it.</p>
+  </aside>
 
   <aside id="ask" class="ask hidden">
     <header class="ask-head">
@@ -209,7 +324,7 @@
       <button id="frame-add" class="mini" title="New frame (⌥⌘F)">
         <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
-      <button id="frame-dup" class="mini" title="Duplicate frame (⌘D)">
+      <button id="frame-dup" class="mini" title="Duplicate frame (⌘D while the timeline is open)">
         <svg viewBox="0 0 24 24"><rect x="4" y="4" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 20h10a2 2 0 0 0 2-2V8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       </button>
       <button id="frame-del" class="mini" title="Delete frame">
@@ -244,11 +359,21 @@
     </label>
   </div>
 
-  <div id="wand-actions" class="wand-actions hidden">
-    <span class="wand-hint">Selected by color</span>
+  <div id="sel-actions" class="floatbar hidden">
+    <span class="floatbar-hint" id="sel-hint">Selection</span>
+    <button id="sel-duplicate" title="Duplicate in place (⌘D)">Duplicate</button>
+    <button id="sel-copy" title="Copy (⌘C)">Copy</button>
+    <button id="sel-sticker" title="Keep this as a sticker (⇧⌘D)">Save sticker</button>
+    <button id="sel-delete" title="Delete (⌫)">Delete</button>
+  </div>
+
+  <div id="wand-actions" class="floatbar hidden">
+    <span class="floatbar-hint">Selected by color</span>
     <button id="wand-cut" title="Make the selected pixels transparent (⌫)">Erase selected</button>
     <button id="wand-keep" title="Keep only the selected pixels; everything else goes transparent">Keep only</button>
   </div>
+
+  <div id="toast" class="toast hidden"></div>
 
   <div id="export-anim" class="sheet hidden">
     <div class="sheet-card">

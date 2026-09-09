@@ -509,12 +509,18 @@ export function paintExport(
   images: BoardImage[],
   layers: Layer[],
   theme: Theme,
-  layout: ExportLayout
+  layout: ExportLayout,
+  // Null leaves the canvas transparent, which is what a sticker thumbnail
+  // wants: it has to sit on whichever board colour is up at the time.
+  background: string | null = theme.bg
 ): void {
   const ctx = canvas.getContext('2d')!;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = theme.bg;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (background !== null) {
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   const everything: BBox = { minX: -Infinity, minY: -Infinity, maxX: Infinity, maxY: Infinity };
   const buckets = bucketByLayer(strokes, images, layers);
@@ -543,12 +549,15 @@ export function renderExport(
   images: BoardImage[],
   layers: Layer[],
   content: BBox,
-  theme: Theme
+  theme: Theme,
+  opts: ExportLayoutOpts & { background?: string | null } = {}
 ): HTMLCanvasElement {
-  const layout = exportLayout(content);
+  const layout = exportLayout(content, opts);
   const canvas = document.createElement('canvas');
   canvas.width = layout.width;
   canvas.height = layout.height;
-  paintExport(canvas, strokes, images, layers, theme, layout);
+  // `??` would swallow an explicit null, which is the whole point of the option.
+  const background = 'background' in opts ? (opts.background as string | null) : theme.bg;
+  paintExport(canvas, strokes, images, layers, theme, layout, background);
   return canvas;
 }

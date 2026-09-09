@@ -5,6 +5,8 @@ import { MAX_FPS, MIN_FPS, defaultOnion, emptyBBox, growBBox, isBrush, newFrame,
 export type Op =
   | { type: 'add'; stroke: Stroke }
   | { type: 'add-many'; strokes: Stroke[] }
+  | { type: 'add-items'; strokes: Stroke[]; images: BoardImage[] }
+  | { type: 'remove-items'; strokes: { index: number; stroke: Stroke }[]; images: { index: number; image: BoardImage }[] }
   | { type: 'remove'; removed: { index: number; stroke: Stroke }[] }
   | { type: 'replace'; changes: StrokeReplacement[]; imageChanges?: ImageSrcChange[] }
   | { type: 'clear'; strokes: { index: number; stroke: Stroke }[]; images: { index: number; image: BoardImage }[] }
@@ -87,6 +89,33 @@ export class Board {
     if (strokes.length === 0) return;
     this.strokes.push(...strokes);
     this.push({ type: 'add-many', strokes });
+  }
+
+  // Ink and pictures arriving together — a paste, a duplicate, a sticker
+  // stamped down — are one thing that happened, so they undo in one step.
+  addItems(strokes: Stroke[], images: BoardImage[]): void {
+    if (strokes.length === 0 && images.length === 0) return;
+    this.strokes.push(...strokes);
+    for (const image of images) {
+      this.hydrate(image);
+      this.images.push(image);
+    }
+    this.push({ type: 'add-items', strokes, images });
+  }
+
+  // The other half of addItems: deleting a mixed selection is one step, so
+  // getting it back is one press of undo rather than one per kind.
+  removeItems(strokeIds: Set<string>, imageIds: Set<string>): void {
+    const strokes = this.strokes
+      .map((stroke, index) => ({ index, stroke }))
+      .filter(({ stroke }) => strokeIds.has(stroke.id));
+    const images = this.images
+      .map((image, index) => ({ index, image }))
+      .filter(({ image }) => imageIds.has(image.id));
+    if (strokes.length === 0 && images.length === 0) return;
+    if (strokes.length) this.strokes = this.strokes.filter((stroke) => !strokeIds.has(stroke.id));
+    if (images.length) this.images = this.images.filter((image) => !imageIds.has(image.id));
+    this.push({ type: 'remove-items', strokes, images });
   }
 
   // ---- images -------------------------------------------------------------
@@ -527,6 +556,18 @@ export class Board {
     } else if (op.type === 'add-many') {
       const ids = new Set(op.strokes.map((stroke) => stroke.id));
       this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
+    } else if (op.type === 'add-items') {
+      const ids = new Set(op.strokes.map((stroke) => stroke.id));
+      const pics = new Set(op.images.map((image) => image.id));
+      if (ids.size) this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
+      if (pics.size) this.images = this.images.filter((image) => !pics.has(image.id));
+    } else if (op.type === 'remove-items') {
+      for (const { index, stroke } of op.strokes) {
+        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
+      }
+      for (const { index, image } of op.images) {
+        this.images.splice(Math.min(index, this.images.length), 0, image);
+      }
     } else if (op.type === 'remove') {
       for (const { index, stroke } of op.removed) {
         this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
@@ -600,6 +641,14 @@ export class Board {
       this.strokes.push(op.stroke);
     } else if (op.type === 'add-many') {
       this.strokes.push(...op.strokes);
+    } else if (op.type === 'add-items') {
+      this.strokes.push(...op.strokes);
+      this.images.push(...op.images);
+    } else if (op.type === 'remove-items') {
+      const ids = new Set(op.strokes.map(({ stroke }) => stroke.id));
+      const pics = new Set(op.images.map(({ image }) => image.id));
+      if (ids.size) this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
+      if (pics.size) this.images = this.images.filter((image) => !pics.has(image.id));
     } else if (op.type === 'remove') {
       const ids = new Set(op.removed.map((r) => r.stroke.id));
       this.strokes = this.strokes.filter((s) => !ids.has(s.id));
