@@ -100,40 +100,64 @@ body.mac .titlebar {
   -webkit-app-region: no-drag;
 }
 
+/* Centred with auto margins rather than a translate, which leaves `transform`
+   free for the slide between edges. Each pair resets the other axis outright,
+   since the two sets of insets would otherwise both still apply. */
 .dock[data-side='top'],
 .dock[data-side='bottom'] {
   flex-direction: row;
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: calc(100vw - 28px);
+  left: 0;
+  right: 0;
+  top: auto;
+  bottom: auto;
+  width: max-content;
+  height: auto;
+  margin: 0 auto;
+  max-width: calc(100vw - 24px);
+  max-height: none;
 }
 
 .dock[data-side='left'],
 .dock[data-side='right'] {
   flex-direction: column;
-  top: 50%;
-  transform: translateY(-50%);
-  max-height: calc(100vh - 28px);
+  top: 0;
+  bottom: 0;
+  left: auto;
+  right: auto;
+  width: auto;
+  height: max-content;
+  margin: auto 0;
+  max-height: calc(100vh - 24px);
+  max-width: none;
 }
 
+/* Right up against the top edge. On macOS it drops to clear the traffic
+   lights only when it is actually wide enough to reach them — see placeDock. */
 .dock[data-side='top'] {
-  top: calc(var(--safe-top) + 8px);
+  top: var(--dock-top, 10px);
 }
 
 .dock[data-side='bottom'] {
-  bottom: 14px;
+  bottom: 12px;
 }
 
 body.timeline-open .dock[data-side='bottom'] {
-  bottom: calc(var(--timeline-h) + 14px);
+  bottom: calc(var(--timeline-h) + 12px);
 }
 
 .dock[data-side='left'] {
-  left: 14px;
+  left: 12px;
 }
 
 .dock[data-side='right'] {
-  right: 14px;
+  right: 12px;
+}
+
+/* Moving edges is a journey, not a jump: the bar re-forms in its new place and
+   is then carried there from the old one. */
+.dock.moving,
+.tool-settings.moving {
+  transition: transform 340ms cubic-bezier(0.22, 0.9, 0.24, 1);
 }
 
 /* The scrollable middle. Overflow is hidden rather than scrolled: when it no
@@ -436,7 +460,11 @@ body.timeline-open .floatbar {
   inset: 0;
   z-index: 40;
   display: grid;
-  place-items: center;
+  /* `safe` keeps the top of an over-tall card reachable on a short window
+     instead of centring it into the scroll gutter. */
+  place-items: safe center;
+  padding: 16px;
+  overflow: auto;
   background: rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(5px);
 }
@@ -644,6 +672,20 @@ body.timeline-open .floatbar {
   color: var(--fg);
 }
 
+/* It points where the flyout will appear, which depends on the edge the bar
+   is on — a chevron aimed at the window frame is just confusing. */
+.dock[data-side='bottom'] .caret svg {
+  transform: rotate(180deg);
+}
+
+.dock[data-side='left'] .caret svg {
+  transform: rotate(-90deg);
+}
+
+.dock[data-side='right'] .caret svg {
+  transform: rotate(90deg);
+}
+
 /* Chips are the two controls that carry a value rather than a state: they
    show it in the bar and open the real control when clicked. */
 .chip {
@@ -672,6 +714,35 @@ body.timeline-open .floatbar {
   font-variant-numeric: tabular-nums;
   min-width: 30px;
   text-align: left;
+}
+
+.chip-label i {
+  font-style: normal;
+  margin-left: 0.15em;
+}
+
+/* Stacked and stripped to the number on the side rails: a column is only ever
+   as wide as its widest item, and spelled out in a row this chip was it. */
+.dock[data-side='left'] .size-chip,
+.dock[data-side='right'] .size-chip {
+  flex-direction: column;
+  gap: 0;
+  height: auto;
+  padding: 3px 6px 4px;
+  border-radius: 14px;
+}
+
+.dock[data-side='left'] .size-chip .chip-label,
+.dock[data-side='right'] .size-chip .chip-label {
+  min-width: 0;
+  font-size: 9px;
+  line-height: 1;
+  text-align: center;
+}
+
+.dock[data-side='left'] .size-chip .chip-label i,
+.dock[data-side='right'] .size-chip .chip-label i {
+  display: none;
 }
 
 .color-chip {
@@ -722,7 +793,7 @@ body.timeline-open .zoom-pill {
 
 body.timeline-open .layers,
 body.timeline-open .stickers {
-  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px - var(--timeline-h));
+  max-height: calc(100% - max(var(--pad-top), var(--safe-top)) - var(--pad-bottom) - 60px - var(--timeline-h));
 }
 
 /* ---- timeline ---- */
@@ -915,10 +986,10 @@ body.timeline-open .stickers {
 
 .ask {
   position: fixed;
-  top: calc(var(--pad-top) + var(--safe-top) + 12px);
+  top: calc(max(var(--pad-top), var(--safe-top)) + 12px);
   left: calc(var(--pad-left) + 12px);
   width: 300px;
-  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px);
+  max-height: calc(100% - max(var(--pad-top), var(--safe-top)) - var(--pad-bottom) - 60px);
   display: flex;
   flex-direction: column;
   background: var(--bar);
@@ -930,7 +1001,7 @@ body.timeline-open .stickers {
 }
 
 body.timeline-open .ask {
-  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px - var(--timeline-h));
+  max-height: calc(100% - max(var(--pad-top), var(--safe-top)) - var(--pad-bottom) - 60px - var(--timeline-h));
 }
 
 .ask.hidden {
@@ -1160,10 +1231,10 @@ body.timeline-open .ask {
 
 .layers {
   position: fixed;
-  top: calc(var(--pad-top) + var(--safe-top) + 12px);
+  top: calc(max(var(--pad-top), var(--safe-top)) + 12px);
   right: calc(var(--pad-right) + 12px);
   width: 208px;
-  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px);
+  max-height: calc(100% - max(var(--pad-top), var(--safe-top)) - var(--pad-bottom) - 60px);
   display: flex;
   flex-direction: column;
   background: var(--bar);
@@ -1539,6 +1610,9 @@ input[type='range'].rainbow::-webkit-slider-thumb {
   flex-direction: column;
   gap: 10px;
   padding: 12px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: auto;
   background: var(--bar);
   border: 1px solid var(--bar-border);
   border-radius: 14px;
@@ -1823,10 +1897,10 @@ input[type='range'].rainbow::-webkit-slider-thumb {
 
 .stickers {
   position: fixed;
-  top: calc(var(--pad-top) + var(--safe-top) + 12px);
+  top: calc(max(var(--pad-top), var(--safe-top)) + 12px);
   right: calc(var(--pad-right) + 12px);
   width: 224px;
-  max-height: calc(100% - var(--pad-top) - var(--pad-bottom) - 84px);
+  max-height: calc(100% - max(var(--pad-top), var(--safe-top)) - var(--pad-bottom) - 60px);
   display: flex;
   flex-direction: column;
   background: var(--bar);
@@ -1837,16 +1911,9 @@ input[type='range'].rainbow::-webkit-slider-thumb {
   overflow: hidden;
 }
 
-/* Both right-hand panels can be open at once, so the second one steps down. */
-body.layers-open .stickers {
-  top: auto;
-  bottom: calc(var(--pad-bottom) + 58px); /* clears the zoom pill */
-  max-height: 44%;
-}
-
-body.layers-open.timeline-open .stickers {
-  bottom: calc(var(--pad-bottom) + var(--timeline-h) + 58px);
-}
+/* Both right-hand panels can be open at once. The second one is stacked under
+   the first from JS rather than here, because where the first one ends depends
+   on how many layers there are. */
 
 .stickers.hidden {
   display: none;

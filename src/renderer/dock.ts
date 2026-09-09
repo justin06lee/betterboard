@@ -26,6 +26,8 @@ export interface DockOpts extends DockParts {
   onSide: (side: DockSide) => void;
   onLayout: () => void;
   closeOverflow: () => void;
+  // Anything parked against the dock that should travel with it when it moves.
+  travelling?: () => HTMLElement[];
 }
 
 export interface Dock {
@@ -78,21 +80,51 @@ export function createDock(opts: DockOpts): Dock {
 
   function setSide(next: DockSide): void {
     if (side === next) return;
+    // Where everything was, before anything is allowed to move.
+    const moving = [dock, ...(opts.travelling?.() ?? [])];
+    const from = moving.map((el) => el.getBoundingClientRect());
+
     side = next;
     dock.dataset.side = next;
     // Told before anything is laid out: relayout's onLayout hook places panels
     // against the dock, and it has to be placing them against the new edge.
     opts.onSide(next);
     relayout();
+
+    // Everything is already in its final place; the offsets below put it back
+    // where it was for one frame and then let it travel. Doing it this way
+    // round rather than animating the layout means nothing downstream — pads,
+    // the settings strip, the popovers — ever measures a half-finished move.
+    slide(moving, from);
   }
 
+  function slide(els: HTMLElement[], from: DOMRect[]): void {
+    const offsets = els.map((el, i) => {
+      const to = el.getBoundingClientRect();
+      return { dx: from[i].left - to.left, dy: from[i].top - to.top };
+    });
+    for (const [i, el] of els.entries()) {
+      el.classList.remove('moving');
+      el.style.transform = `translate(${offsets[i].dx}px, ${offsets[i].dy}px)`;
+    }
+    void dock.offsetWidth; // one reflow, so the offset above is a real start state
+    for (const el of els) {
+      el.classList.add('moving');
+      el.style.transform = '';
+      el.addEventListener('transitionend', () => el.classList.remove('moving'), { once: true });
+    }
+  }
+
+  // Measured from the edge the dock is on to its far side, so a panel reading
+  // these clears the real thing rather than an assumed offset. Only ever asked
+  // for while the dock is sitting still: mid-slide the rectangle is a lie.
   function pads(): { top: number; right: number; bottom: number; left: number } {
     const r = dock.getBoundingClientRect();
     const out = { top: 0, right: 0, bottom: 0, left: 0 };
-    if (side === 'top') out.top = r.height + 16;
-    else if (side === 'bottom') out.bottom = r.height + 16;
-    else if (side === 'left') out.left = r.width + 16;
-    else out.right = r.width + 16;
+    if (side === 'top') out.top = r.bottom + 10;
+    else if (side === 'bottom') out.bottom = window.innerHeight - r.top + 10;
+    else if (side === 'left') out.left = r.right + 10;
+    else out.right = window.innerWidth - r.left + 10;
     return out;
   }
 

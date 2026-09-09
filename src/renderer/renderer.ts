@@ -49,6 +49,7 @@ type WandMode = 'point' | 'background';
 type FillMode = 'region' | 'similar';
 type Persona = 'student' | 'artist' | 'animator' | 'photo' | 'anything';
 
+const TIMELINE_H = 68; // px, mirrors --timeline-h
 const ERASER_RADIUS = 16; // screen px
 const MIN_DIST = 0.75; // screen px between recorded points
 const LASSO_MIN_DIST = 2.5; // screen px between recorded lasso points
@@ -653,7 +654,7 @@ function setSize(v: number): void {
   sizeDot.style.height = `${d}px`;
   sizeDot.style.borderRadius = brush === 'pixel' ? '2px' : '50%';
   const px = brushPixels();
-  sizeChipLabel.innerHTML = `${px}&thinsp;px`;
+  sizeChipLabel.innerHTML = `${px}<i>px</i>`;
   sizeReadout.textContent = `${px} px · ${BRUSHES[brush].label}`;
   if (document.activeElement !== sizeInput) sizeInput.value = String(v);
   if (document.activeElement !== sizeNumber) sizeNumber.value = String(v);
@@ -1068,6 +1069,7 @@ function setTimelineOpen(open: boolean): void {
     stopPlayback();
     onionPanel.classList.add('hidden');
   }
+  stackRightPanels();
   savePrefs();
   resizeCanvas();
   renderTimeline();
@@ -1219,6 +1221,7 @@ function renderLayers(): void {
   layerOpacityVal.textContent = `${Math.round(active.opacity * 100)}%`;
   syncSlider(layerOpacityInput);
   layerDeleteBtn.disabled = board.layers.length <= 1;
+  stackRightPanels(); // a layer added or removed changes where the tray starts
 }
 
 function startRename(row: HTMLElement, id: string, current: string): void {
@@ -1292,6 +1295,7 @@ function setLayersOpen(open: boolean): void {
   // Both right-hand panels share an edge; the class lets the stickers tray
   // step out of the way when layers is up.
   document.body.classList.toggle('layers-open', open);
+  stackRightPanels();
   savePrefs();
 }
 
@@ -3289,14 +3293,54 @@ const dockGrip = $('dock-grip');
 const dockOverflow = $('dock-overflow');
 let dock: Dock | null = null;
 
+// On macOS the bar sits right at the top edge, and only steps down when it is
+// actually wide enough to run into the traffic lights — which, since it is
+// centred and sheds sections as it narrows, is a question about this window at
+// this moment rather than about the platform.
+const LIGHTS = 96; // px of window corner the traffic lights own
+
+function placeDock(): void {
+  if (dockSide !== 'top' || !document.body.classList.contains('mac')) {
+    dockEl.style.removeProperty('--dock-top');
+    return;
+  }
+  dockEl.style.setProperty('--dock-top', '10px');
+  if (dockEl.getBoundingClientRect().left < LIGHTS) {
+    dockEl.style.setProperty('--dock-top', 'calc(var(--safe-top) + 4px)');
+  }
+}
+
 function applyDockPads(): void {
   if (!dock) return;
+  placeDock();
   const pads = dock.pads();
   const style = document.body.style;
   style.setProperty('--pad-top', `${pads.top}px`);
   style.setProperty('--pad-right', `${pads.right}px`);
   style.setProperty('--pad-bottom', `${pads.bottom}px`);
   style.setProperty('--pad-left', `${pads.left}px`);
+  stackRightPanels();
+}
+
+// Layers and the stickers tray share the right-hand rail. Where the first one
+// ends depends on how many layers there are, so the second is hung off its
+// real bottom edge rather than guessed at from the window — on a short window
+// a guess is the difference between a tidy column and two panels on top of
+// each other.
+function stackRightPanels(): void {
+  stickersPanel.style.top = '';
+  stickersPanel.style.bottom = '';
+  stickersPanel.style.maxHeight = '';
+  if (!stickersOpen || !layersOpen) return;
+  const gap = 10;
+  const below = layersPanel.getBoundingClientRect().bottom + gap;
+  // Zoom pill, its margin, and a gap — the tray stops above all three.
+  const floor = (dock?.pads().bottom ?? 0) + (timelineOpen ? TIMELINE_H : 0) + 56;
+  stickersPanel.style.top = `${below}px`;
+  stickersPanel.style.bottom = 'auto';
+  // A floor, because a tray too short to show a sticker is worse than one that
+  // has to scroll — and on a window that small, something has to give.
+  stickersPanel.style.maxHeight = `${Math.max(96, window.innerHeight - below - floor)}px`;
 }
 
 // The live tool's options ride alongside the dock rather than inside it: they
@@ -3336,9 +3380,12 @@ function setupDock(): void {
     grip: dockGrip,
     overflow: dockOverflow,
     // Board toggles and history live in the menus too, so they are the first
-    // things to fold away; the colour and size chips are the last, because
-    // nothing else in the app puts them a single click from the drawing.
-    shedOrder: ['view', 'history', 'color', 'size'],
+    // things to fold away; the colour and size chips outlast them, because
+    // nothing else in the app puts them a single click from the drawing. The
+    // brushes and the tools are last and only go on a genuinely tiny window —
+    // but they do go, because a bar with its end cut off is worse than a bar
+    // that admits it needs a menu.
+    shedOrder: ['view', 'history', 'color', 'size', 'tools', 'brushes'],
     onSide: (side) => {
       dockSide = side;
       savePrefs();
@@ -3349,6 +3396,7 @@ function setupDock(): void {
       placeToolSettings();
     },
     closeOverflow: () => closePops(),
+    travelling: () => (toolSettings.classList.contains('hidden') ? [] : [toolSettings]),
   });
   dock.relayout();
   dockMoreBtn.addEventListener('click', () => togglePop(dockOverflow, dockMoreBtn));
@@ -3997,6 +4045,7 @@ function setStickersOpen(open: boolean): void {
   stickersOpen = open;
   stickersPanel.classList.toggle('hidden', !open);
   stickersBtn.classList.toggle('active', open);
+  stackRightPanels();
   savePrefs();
 }
 
