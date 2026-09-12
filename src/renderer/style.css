@@ -1500,6 +1500,18 @@ input.layer-name {
   border-left: 1px solid var(--bar-border);
 }
 
+/* Stays in the pill for as long as the view is mirrored, so a flip made to
+   check a drawing is never forgotten and drawn on for an hour by accident. */
+#flip-badge {
+  border-right: 1px solid var(--bar-border);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+#flip-badge.hidden {
+  display: none;
+}
+
 #normalize svg {
   width: 15px;
   height: 15px;

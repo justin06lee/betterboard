@@ -175,13 +175,18 @@ export function newLayer(name: string): Layer {
 }
 
 // camera.x/y = world coordinates of the screen origin (top-left);
-// rotation = clockwise view rotation in radians.
-// world -> screen: s = R(rotation) * (w - camera.xy) * scale
+// rotation = clockwise view rotation in radians;
+// flip = the view is mirrored left to right. Nothing in the world moves: it is
+// a way of looking, the check artists make for what their eye stopped seeing.
+// world -> screen: s = R(rotation) * M * (w - camera.xy) * scale, where M
+// negates x when flipped. Mirroring before turning is what keeps the rotation
+// dial turning the picture the way the pointer goes, mirrored or not.
 export interface Camera {
   x: number;
   y: number;
   scale: number;
   rotation: number;
+  flip?: boolean;
 }
 
 export interface Theme {
@@ -204,35 +209,45 @@ export function clampScale(s: number): number {
 }
 
 export function toWorld(camera: Camera, sx: number, sy: number): { x: number; y: number } {
-  const cos = Math.cos(camera.rotation);
-  const sin = Math.sin(camera.rotation);
-  const ux = sx / camera.scale;
-  const uy = sy / camera.scale;
-  return { x: camera.x + ux * cos + uy * sin, y: camera.y - ux * sin + uy * cos };
+  const d = toWorldDelta(camera, sx, sy);
+  return { x: camera.x + d.x, y: camera.y + d.y };
 }
 
 export function toScreen(camera: Camera, wx: number, wy: number): { x: number; y: number } {
   const cos = Math.cos(camera.rotation);
   const sin = Math.sin(camera.rotation);
-  const dx = (wx - camera.x) * camera.scale;
+  const dx = (wx - camera.x) * camera.scale * (camera.flip ? -1 : 1);
   const dy = (wy - camera.y) * camera.scale;
   return { x: dx * cos - dy * sin, y: dx * sin + dy * cos };
 }
 
-// Screen-space delta -> world-space delta (undoes rotation and scale).
+// Screen-space delta -> world-space delta (undoes rotation, mirroring and scale).
 export function toWorldDelta(camera: Camera, dx: number, dy: number): { x: number; y: number } {
   const cos = Math.cos(camera.rotation);
   const sin = Math.sin(camera.rotation);
-  return { x: (dx * cos + dy * sin) / camera.scale, y: (-dx * sin + dy * cos) / camera.scale };
+  const x = (dx * cos + dy * sin) / camera.scale;
+  return { x: camera.flip ? -x : x, y: (-dx * sin + dy * cos) / camera.scale };
 }
 
 // Repositions camera.x/y so the world point `w` lands on screen point (sx, sy)
-// under the camera's current scale and rotation.
+// under the camera's current scale, rotation and mirroring.
 export function anchorCamera(camera: Camera, w: { x: number; y: number }, sx: number, sy: number): void {
-  const cos = Math.cos(camera.rotation);
-  const sin = Math.sin(camera.rotation);
-  camera.x = w.x - (sx * cos + sy * sin) / camera.scale;
-  camera.y = w.y - (-sx * sin + sy * cos) / camera.scale;
+  const d = toWorldDelta(camera, sx, sy);
+  camera.x = w.x - d.x;
+  camera.y = w.y - d.y;
+}
+
+// Mirrors the view about a screen point — across the upright line through it
+// for 'h', the level one for 'v' — so every visible point lands exactly
+// opposite where it was. Mirroring then turning equals turning the other way
+// then mirroring, which is why the rotation is negated; a vertical mirror is a
+// horizontal one turned half round, so it is taken from 180° instead.
+export function mirrorView(camera: Camera, sx: number, sy: number, axis: 'h' | 'v' = 'h'): void {
+  const w = toWorld(camera, sx, sy);
+  const theta = axis === 'h' ? -camera.rotation : Math.PI - camera.rotation;
+  camera.rotation = Math.atan2(Math.sin(theta), Math.cos(theta));
+  camera.flip = !camera.flip;
+  anchorCamera(camera, w, sx, sy);
 }
 
 export function emptyBBox(): BBox {

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { exportLayout } from './render';
-import type { BBox } from './types';
+import { exportLayout, worldMatrix } from './render';
+import type { BBox, Camera } from './types';
+import { toScreen } from './types';
 
 const box = (minX: number, minY: number, maxX: number, maxY: number): BBox => ({ minX, minY, maxX, maxY });
 
@@ -50,5 +51,26 @@ describe('exportLayout', () => {
     const layout = exportLayout(box(0, 0, 0, 0), { pad: 0, quantize: 2 });
     expect(layout.width).toBe(2);
     expect(layout.height).toBe(2);
+  });
+});
+
+describe('worldMatrix', () => {
+  test('puts every point where toScreen does, turned and mirrored', () => {
+    const cameras: Camera[] = [
+      { x: 10, y: -20, scale: 1.5, rotation: 0.7 },
+      { x: -8, y: 4, scale: 0.5, rotation: -1.9, flip: true },
+    ];
+    for (const camera of cameras) {
+      const [a, b, c, d, e, f] = worldMatrix(camera, 2, 30, 12);
+      for (const [x, y] of [
+        [0, 0],
+        [100, -40],
+        [-75, 60],
+      ]) {
+        const s = toScreen(camera, x, y);
+        expect(a * x + c * y + e).toBeCloseTo((s.x - 30) * 2, 6);
+        expect(b * x + d * y + f).toBeCloseTo((s.y - 12) * 2, 6);
+      }
+    }
   });
 });

@@ -1,7 +1,26 @@
 import type { BBox, BoardImage, Camera, Layer, Point, Stroke, Theme } from './types';
 import { BRUSHES, bboxIntersects, emptyBBox, growBBox, imageBBox, toScreen, toWorld } from './types';
 
-type Matrix = [number, number, number, number, number, number];
+export type Matrix = [number, number, number, number, number, number];
+
+// World -> canvas pixels for a camera, at `ratio` canvas pixels per css pixel,
+// with the css point (ox, oy) landing on the canvas origin. The same map as
+// toScreen, as one setTransform, so the board, a region crop and every overlay
+// drawn with toScreen agree whether the view is turned, mirrored or both.
+export function worldMatrix(camera: Camera, ratio: number, ox = 0, oy = 0): Matrix {
+  const k = ratio * camera.scale;
+  const m = camera.flip ? -1 : 1;
+  const cos = Math.cos(camera.rotation);
+  const sin = Math.sin(camera.rotation);
+  return [
+    k * m * cos,
+    k * m * sin,
+    -k * sin,
+    k * cos,
+    -k * (m * cos * camera.x - sin * camera.y) - ox * ratio,
+    -k * (m * sin * camera.x + cos * camera.y) - oy * ratio,
+  ];
+}
 
 // The lasso being drawn, or a committed selection being dragged. `poly` is in
 // world coordinates. The in-progress move or resize is the world -> world map
@@ -307,17 +326,7 @@ export function render(
   }
 
   // World-space pass: one transform, cached Path2D per stroke.
-  const k = dpr * camera.scale;
-  const cos = Math.cos(camera.rotation);
-  const sin = Math.sin(camera.rotation);
-  const world: Matrix = [
-    k * cos,
-    k * sin,
-    -k * sin,
-    k * cos,
-    -k * (cos * camera.x - sin * camera.y),
-    -k * (sin * camera.x + cos * camera.y),
-  ];
+  const world = worldMatrix(camera, dpr);
   ctx.setTransform(...world);
   if (opts.grid) drawGrid(ctx, camera, view, opts.theme.grid);
 
@@ -443,17 +452,7 @@ export function renderRegion(
 
   // Same world transform the board uses, shifted so the rectangle's top-left
   // corner becomes the image origin.
-  const k = scale * camera.scale;
-  const cos = Math.cos(camera.rotation);
-  const sin = Math.sin(camera.rotation);
-  const world: Matrix = [
-    k * cos,
-    k * sin,
-    -k * sin,
-    k * cos,
-    -k * (cos * camera.x - sin * camera.y) - rect.x * scale,
-    -k * (sin * camera.x + cos * camera.y) - rect.y * scale,
-  ];
+  const world = worldMatrix(camera, scale, rect.x, rect.y);
 
   const view = emptyBBox();
   for (const [sx, sy] of [

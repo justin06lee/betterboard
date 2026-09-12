@@ -51,6 +51,7 @@ import {
   toScreen,
   imageHit,
   isBrush,
+  mirrorView,
   toWorldDelta,
   uid,
 } from './types';
@@ -78,7 +79,7 @@ const NUDGE = 18;
 // ---- state ----------------------------------------------------------------
 
 const board = new Board();
-const camera: Camera = { x: 0, y: 0, scale: 1, rotation: 0 };
+const camera: Camera = { x: 0, y: 0, scale: 1, rotation: 0, flip: false };
 let tool: Tool = 'pen';
 let color = SWATCHES[0];
 let brush: BrushId = 'pen';
@@ -341,7 +342,7 @@ let autosaveTimer: number | undefined;
 function scheduleAutosave(): void {
   clearTimeout(autosaveTimer);
   autosaveTimer = window.setTimeout(() => {
-    void window.betterboard.autosave(board.serialize(camera));
+    void window.betterboard.autosave(board.serialize(fileCamera()));
   }, 800);
 }
 
@@ -431,10 +432,11 @@ function zoomFit(): void {
   camera.rotation = 0; // fit re-frames everything axis-aligned
   updateWheel();
   const b = board.contentBBox(board.visibleStrokes(), board.visibleImages());
+  // Placed by anchoring rather than by arithmetic on the corner, so it lands
+  // centred whether or not the view is mirrored.
   if (!b) {
     camera.scale = 1;
-    camera.x = -cssWidth / 2;
-    camera.y = -cssHeight / 2;
+    anchorCamera(camera, { x: 0, y: 0 }, cssWidth / 2, cssHeight / 2);
   } else {
     const pad = 80;
     const w = Math.max(b.maxX - b.minX, 1);
@@ -442,8 +444,7 @@ function zoomFit(): void {
     camera.scale = clampScale(
       Math.min((cssWidth - pad * 2) / w, (cssHeight - pad * 2) / h, 4)
     );
-    camera.x = (b.minX + b.maxX) / 2 - cssWidth / (2 * camera.scale);
-    camera.y = (b.minY + b.maxY) / 2 - cssHeight / (2 * camera.scale);
+    anchorCamera(camera, { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 }, cssWidth / 2, cssHeight / 2);
   }
   updateZoomLabel();
   requestRender();
@@ -587,6 +588,43 @@ function endRotDrag(): void {
 rotWheel.addEventListener('pointerup', endRotDrag);
 rotWheel.addEventListener('pointercancel', endRotDrag);
 rotWheel.addEventListener('dblclick', () => setRotation(0));
+
+// ---- mirrored view ----------------------------------------------------------
+
+// Flipping is how an artist catches what their eye has stopped seeing: a lean,
+// a face drifting to one side, an arm too long. It changes only how the board
+// is looked at — strokes, exports and saved files all stay the right way round.
+const flipBtn = $('flip-btn');
+const flipBadge = $('flip-badge');
+let flippedBy: 'h' | 'v' = 'h'; // so the badge undoes whichever flip is showing
+
+function flipView(axis: 'h' | 'v'): void {
+  if (drag || live) return; // the pointer's world position would jump mid-gesture
+  if (!camera.flip) flippedBy = axis;
+  mirrorView(camera, cssWidth / 2, cssHeight / 2, axis);
+  syncFlip();
+  updateWheel();
+  requestRender();
+  if (!camera.flip) toast('Canvas flipped back');
+  else toast(axis === 'h' ? 'Canvas flipped — M flips it back' : 'Canvas flipped upside down — ⇧M flips it back');
+}
+
+function syncFlip(): void {
+  flipBtn.classList.toggle('active', camera.flip === true);
+  flipBadge.classList.toggle('hidden', !camera.flip);
+}
+
+// A file never records a mirrored view. It writes down the same spot the right
+// way round, so a board always reopens reading correctly.
+function fileCamera(): Camera {
+  if (!camera.flip) return camera;
+  const unflipped = { ...camera };
+  mirrorView(unflipped, cssWidth / 2, cssHeight / 2, flippedBy);
+  return unflipped;
+}
+
+flipBtn.addEventListener('click', () => flipView('h'));
+flipBadge.addEventListener('click', () => flipView(flippedBy));
 
 // ---- ui sync --------------------------------------------------------------
 
@@ -2526,12 +2564,9 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
   if (drag.kind === 'pan') {
-    const cos = Math.cos(camera.rotation);
-    const sin = Math.sin(camera.rotation);
-    const dx = e.clientX - drag.startX;
-    const dy = e.clientY - drag.startY;
-    camera.x = drag.camX - (dx * cos + dy * sin) / camera.scale;
-    camera.y = drag.camY - (-dx * sin + dy * cos) / camera.scale;
+    const d = toWorldDelta(camera, e.clientX - drag.startX, e.clientY - drag.startY);
+    camera.x = drag.camX - d.x;
+    camera.y = drag.camY - d.y;
     requestRender();
     scheduleAutosave();
     return;
@@ -2613,10 +2648,9 @@ canvas.addEventListener(
     if (e.ctrlKey || e.metaKey) {
       zoomAt(e.offsetX, e.offsetY, Math.exp(-e.deltaY * 0.01));
     } else {
-      const cos = Math.cos(camera.rotation);
-      const sin = Math.sin(camera.rotation);
-      camera.x += (e.deltaX * cos + e.deltaY * sin) / camera.scale;
-      camera.y += (-e.deltaX * sin + e.deltaY * cos) / camera.scale;
+      const d = toWorldDelta(camera, e.deltaX, e.deltaY);
+      camera.x += d.x;
+      camera.y += d.y;
       requestRender();
       scheduleAutosave();
     }
@@ -2744,6 +2778,9 @@ window.addEventListener('keydown', (e) => {
       sizeInput.value = String(Math.min(28, size + 1));
       sizeInput.dispatchEvent(new Event('input'));
       break;
+    case 'm':
+      if (!e.repeat) flipView(e.shiftKey ? 'v' : 'h');
+      break;
     case 'r':
       if (!rHeld) {
         rHeld = true;
@@ -2801,6 +2838,8 @@ async function newBoard(): Promise<void> {
   camera.y = -cssHeight / 2;
   camera.scale = 1;
   camera.rotation = 0;
+  camera.flip = false;
+  syncFlip();
   updateWheel();
   updateZoomLabel();
   requestRender();
@@ -2813,6 +2852,9 @@ async function openBoard(): Promise<void> {
   try {
     clearSelection();
     const saved = board.deserialize(json);
+    // A board always opens the right way round; see fileCamera.
+    camera.flip = false;
+    syncFlip();
     if (saved) {
       camera.x = saved.x;
       camera.y = saved.y;
@@ -2969,7 +3011,7 @@ window.betterboard.onMenu((action) => {
       void openBoard();
       break;
     case 'save':
-      void window.betterboard.saveBoard(board.serialize(camera));
+      void window.betterboard.saveBoard(board.serialize(fileCamera()));
       break;
     case 'export':
       void exportPNG();
@@ -3048,6 +3090,12 @@ window.betterboard.onMenu((action) => {
       gridBtn.classList.toggle('active', grid);
       savePrefs();
       requestRender();
+      break;
+    case 'flip-h':
+      flipView('h');
+      break;
+    case 'flip-v':
+      flipView('v');
       break;
     case 'toggle-theme':
       toggleTheme();

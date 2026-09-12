@@ -193,6 +193,11 @@ function buildMenu() {
         { label: 'Toggle Dot Grid', accelerator: 'CmdOrCtrl+G', click: () => send('toggle-grid') },
         { label: 'Toggle Light/Dark Board', accelerator: 'Shift+CmdOrCtrl+L', click: () => send('toggle-theme') },
         { type: 'separator' },
+        // M and Shift+M are handled in the renderer: as menu accelerators they
+        // would be swallowed app-wide and break typing an M in any text field.
+        { label: 'Flip Canvas Horizontally', click: () => send('flip-h') },
+        { label: 'Flip Canvas Vertically', click: () => send('flip-v') },
+        { type: 'separator' },
         {
           label: 'Toolbar Position',
           submenu: [
