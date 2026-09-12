@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, clipboard, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, ipcMain, dialog, nativeImage } = require('electron');
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -45,6 +45,7 @@ const userData = () => app.getPath('userData');
 const autosavePath = () => path.join(userData(), 'autosave.json');
 const windowStatePath = () => path.join(userData(), 'window.json');
 const settingsPath = () => path.join(userData(), 'settings.json');
+const stickersPath = () => path.join(userData(), 'stickers.json');
 
 let win = null;
 
@@ -132,13 +133,18 @@ function buildMenu() {
         { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => send('undo') },
         { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', click: () => send('redo') },
         { type: 'separator' },
-        // Chromium only runs its own paste for editable targets, so pressing
-        // Cmd+V over the canvas fires nothing at all. This routes it to the
-        // renderer, which reads the clipboard through the main process.
+        // Chromium only runs cut/copy/paste for editable targets, so over the
+        // canvas none of them fire at all. All three are routed to the renderer
+        // instead, which serves the canvas or the focused text field itself.
+        { label: 'Cut', accelerator: 'CmdOrCtrl+X', click: () => send('cut') },
+        { label: 'Copy', accelerator: 'CmdOrCtrl+C', click: () => send('copy') },
         { label: 'Paste', accelerator: 'CmdOrCtrl+V', click: () => send('paste') },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'selectAll' },
+        { label: 'Duplicate', accelerator: 'CmdOrCtrl+D', click: () => send('duplicate') },
+        { type: 'separator' },
+        { label: 'Select All', accelerator: 'CmdOrCtrl+A', click: () => send('select-all') },
+        { type: 'separator' },
+        { label: 'Save Selection as Sticker', accelerator: 'Shift+CmdOrCtrl+D', click: () => send('sticker-save') },
+        { label: 'Stickers', accelerator: 'CmdOrCtrl+Alt+S', click: () => send('toggle-stickers') },
         { type: 'separator' },
         { label: 'Clear Frame', accelerator: 'CmdOrCtrl+Backspace', click: () => send('clear') },
       ],
@@ -152,7 +158,10 @@ function buildMenu() {
         { label: 'Play / Pause', accelerator: 'CmdOrCtrl+Return', click: () => send('play') },
         { type: 'separator' },
         { label: 'New Frame', accelerator: 'CmdOrCtrl+Alt+F', click: () => send('frame-new') },
-        { label: 'Duplicate Frame', accelerator: 'CmdOrCtrl+D', click: () => send('frame-duplicate') },
+        // No accelerator: Cmd+D is Edit ▸ Duplicate, which duplicates whatever
+        // is selected and only falls through to the frame when the timeline is
+        // already open. Opening the timeline is never a side effect of it.
+        { label: 'Duplicate Frame', click: () => send('frame-duplicate') },
         { label: 'Delete Frame', click: () => send('frame-delete') },
         { type: 'separator' },
         { label: 'Previous Frame', accelerator: 'CmdOrCtrl+Alt+Left', click: () => send('frame-prev') },
@@ -184,6 +193,20 @@ function buildMenu() {
         { label: 'Toggle Dot Grid', accelerator: 'CmdOrCtrl+G', click: () => send('toggle-grid') },
         { label: 'Toggle Light/Dark Board', accelerator: 'Shift+CmdOrCtrl+L', click: () => send('toggle-theme') },
         { type: 'separator' },
+        // M and Shift+M are handled in the renderer: as menu accelerators they
+        // would be swallowed app-wide and break typing an M in any text field.
+        { label: 'Flip Canvas Horizontally', click: () => send('flip-h') },
+        { label: 'Flip Canvas Vertically', click: () => send('flip-v') },
+        { type: 'separator' },
+        {
+          label: 'Toolbar Position',
+          submenu: [
+            { label: 'Top', click: () => send('dock-top') },
+            { label: 'Left', click: () => send('dock-left') },
+            { label: 'Right', click: () => send('dock-right') },
+            { label: 'Bottom', click: () => send('dock-bottom') },
+          ],
+        },
         { label: 'Choose Workspace…', click: () => send('choose-workspace') },
         { type: 'separator' },
         { role: 'togglefullscreen' },
@@ -402,6 +425,36 @@ function registerIpc() {
   });
 
   ipcMain.handle('clipboard:text', () => clipboard.readText());
+
+  ipcMain.handle('clipboard:write-text', (_e, text) => {
+    clipboard.writeText(String(text ?? ''));
+  });
+
+  // Copying a selection also puts a picture of it on the system clipboard, so
+  // it can be pasted into any other app. The renderer keeps the data URL it
+  // wrote and compares it on paste: still there means the board's own copy is
+  // the live one, gone means something else was copied since.
+  ipcMain.handle('clipboard:write-image', (_e, dataURL, text) => {
+    const image = nativeImage.createFromDataURL(dataURL);
+    if (image.isEmpty()) return false;
+    if (text) clipboard.write({ image, text });
+    else clipboard.writeImage(image);
+    return true;
+  });
+
+  ipcMain.handle('stickers:load', () => {
+    const saved = readJSON(stickersPath());
+    return Array.isArray(saved) ? saved : [];
+  });
+
+  ipcMain.handle('stickers:save', (_e, stickers) => {
+    try {
+      fs.writeFileSync(stickersPath(), JSON.stringify(stickers));
+      return true;
+    } catch {
+      return false;
+    }
+  });
 
   ipcMain.handle('image:open', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {

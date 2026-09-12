@@ -13,6 +13,8 @@ export function buildPath(stroke: Stroke, live = false): Path2D {
       return paintPath(stroke, live);
     case 'chalk':
       return chalkPath(stroke);
+    case 'liner':
+      return linerPath(stroke, live);
     default:
       return penPath(stroke, live);
   }
@@ -70,6 +72,30 @@ function markerPath(stroke: Stroke, live: boolean): Path2D {
       last: !live,
       start: { cap: false, taper: 0 },
       end: { cap: false, taper: 0 },
+    }
+  );
+  const path = new Path2D();
+  if (outline.length < 3) return dot(path, stroke, stroke.size / 2);
+  appendOutline(path, outline);
+  return path;
+}
+
+// Constant width, round ends, and pressure ignored on purpose: thinning is off
+// and simulatePressure is off, so a stylus leaning hard and a mouse click draw
+// exactly the same line. Streamlined a little harder than the pen, because
+// with no taper to hide it every wobble of the hand stays at full width.
+function linerPath(stroke: Stroke, live: boolean): Path2D {
+  const outline = getStroke(
+    stroke.points.map((pt) => [pt.x, pt.y, 0.5]),
+    {
+      size: stroke.size,
+      thinning: 0,
+      smoothing: 0.55,
+      streamline: live ? 0.4 : 0.5,
+      simulatePressure: false,
+      last: !live,
+      start: { cap: true, taper: 0 },
+      end: { cap: true, taper: 0 },
     }
   );
   const path = new Path2D();

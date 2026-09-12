@@ -35,6 +35,10 @@ interface BetterboardAPI {
   openImages(): Promise<string[]>;
   clipboardImage(): Promise<string | null>;
   clipboardText(): Promise<string>;
+  clipboardWriteImage(dataURL: string, text?: string): Promise<boolean>;
+  clipboardWriteText(text: string): Promise<void>;
+  loadStickers(): Promise<unknown[]>;
+  saveStickers(stickers: unknown[]): Promise<boolean>;
   exportPNG(dataURL: string): Promise<boolean>;
   exportAnimation(bytes: Uint8Array, format: 'mp4' | 'webm' | 'gif'): Promise<boolean>;
   confirm(message: string, detail?: string): Promise<boolean>;

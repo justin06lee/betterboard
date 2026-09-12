@@ -1,14 +1,33 @@
 import { buildPath, strokeHit } from './ink';
 import { eraseStrokePoints } from './erase';
-import { backgroundSelect, dilate, floodSelect, maskBounds } from './pixels';
+import { backgroundSelect, dilate, floodSelect, maskBounds, maskTouchesBorder, similarSelect } from './pixels';
 import { drawingToLines } from './ai-drawing';
 import type { AiConnection, AiConnectionKind, AiConnectionState } from './global';
-import type { Ghost } from './render';
+import type { Ghost, Marquee } from './render';
 import type { ImageSrcChange, Rect, StrokeReplacement } from './store';
 import type { AnimFormat, AnimSettings } from './animation';
 import { animationLayout, exportAnimation, gifDelayMs } from './animation';
-import { HANDLE, render, renderExport, renderRegion } from './render';
+import { HANDLE, exportLayout, paintExport, render, renderExport, renderRegion } from './render';
 import { Board } from './store';
+import type { Clip, Sticker } from './clip';
+import { MAX_STICKERS, isSticker, makeClip, placeClip, stickerName } from './clip';
+import type { Dock, DockSide } from './dock';
+import { createDock, isDockSide } from './dock';
+import type { GripMode } from './transform';
+import {
+  OPPOSITE,
+  bboxRect,
+  boxAffine,
+  boxGrips,
+  gripMode,
+  mapPoint,
+  resizeCursor,
+  resizeRect,
+  transformRect,
+  transformStroke,
+} from './transform';
+import type { HSV } from './color';
+import { hexToRgb, hsvToRgb, parseColor, pushRecent, rgbToHex, rgbToHsv } from './color';
 import type { BBox, BoardImage, BrushId, Camera, Point, Stroke } from './types';
 import {
   BRUSHES,
@@ -32,16 +51,19 @@ import {
   toScreen,
   imageHit,
   isBrush,
+  mirrorView,
   toWorldDelta,
   uid,
 } from './types';
 
-type Tool = 'pen' | 'eraser' | 'select' | 'wand' | 'ask' | 'hand';
+type Tool = 'pen' | 'eraser' | 'fill' | 'select' | 'wand' | 'picker' | 'ask' | 'hand';
 type ThemeName = 'dark' | 'light';
 type EraserMode = 'stroke' | 'area';
 type WandMode = 'point' | 'background';
+type FillMode = 'region' | 'similar';
 type Persona = 'student' | 'artist' | 'animator' | 'photo' | 'anything';
 
+const TIMELINE_H = 68; // px, mirrors --timeline-h
 const ERASER_RADIUS = 16; // screen px
 const MIN_DIST = 0.75; // screen px between recorded points
 const LASSO_MIN_DIST = 2.5; // screen px between recorded lasso points
@@ -49,11 +71,15 @@ const TAP_SLOP = 6; // screen px: a lasso smaller than this counts as a tap
 const ENCLOSED = 0.7; // fraction of a stroke's points that must fall inside the lasso
 const SWATCHES = ['#e8eaed', '#1e1e24', '#ef476f', '#ffb703', '#06d6a0', '#4cc9f0', '#a78bfa'];
 const EMPTY_BOARD = '{"app":"betterboard","version":1,"strokes":[]}';
+// Where a pasted or duplicated copy lands relative to the original, in screen
+// pixels, when there is no pointer to put it under: far enough to see that
+// something happened, near enough to still be one gesture from where it was.
+const NUDGE = 18;
 
 // ---- state ----------------------------------------------------------------
 
 const board = new Board();
-const camera: Camera = { x: 0, y: 0, scale: 1, rotation: 0 };
+const camera: Camera = { x: 0, y: 0, scale: 1, rotation: 0, flip: false };
 let tool: Tool = 'pen';
 let color = SWATCHES[0];
 let brush: BrushId = 'pen';
@@ -62,12 +88,29 @@ let themeName: ThemeName = 'dark';
 let grid = true;
 let eraserMode: EraserMode = 'stroke';
 let layersOpen = true;
+let stickersOpen = false;
 let timelineOpen = false;
 let playing = false;
 let loop = true;
+let dockSide: DockSide = 'top';
 
 let wandMode: WandMode = 'point';
 let wandTolerance = 32;
+let fillMode: FillMode = 'region';
+let fillTolerance = 26;
+
+// Colours reached for lately, most recent first. Kept in prefs rather than the
+// board: it is how you work, not what you drew.
+let recent: string[] = [];
+
+// The board's own clipboard. `clipMark` is the picture that was put on the
+// system clipboard alongside it; if the system clipboard still holds exactly
+// that, the copy is still ours and paste can bring back real strokes instead
+// of a flat picture of them.
+let clipboard: Clip | null = null;
+let clipMark: string | null = null;
+
+let stickers: Sticker[] = [];
 
 let live: Stroke | null = null;
 let spaceHeld = false;
@@ -86,9 +129,19 @@ let wandSel: { imageId: string; mask: Uint8Array; width: number; height: number;
 
 // The lasso path while it is being drawn, then the committed selection it
 // produced. Both live in world coordinates, so they stay put under pan, zoom
-// and rotation without any bookkeeping.
+// and rotation without any bookkeeping. `loop` marks an outline that is the
+// lasso as drawn; any other selection is outlined by its box, worked out fresh
+// from what it holds every time it is drawn — until it is reshaped, when `box`
+// keeps the box exactly as it was let go (see selectionBox).
+interface BoardSelection {
+  ids: Set<string>;
+  images: Set<string>;
+  poly: Point[];
+  loop?: boolean;
+  box?: Rect;
+}
 let lasso: Point[] | null = null;
-let selection: { ids: Set<string>; images: Set<string>; poly: Point[] } | null = null;
+let selection: BoardSelection | null = null;
 let moveX = 0;
 let moveY = 0;
 let hoverInSelection = false;
@@ -96,16 +149,42 @@ let hoverHandle: string | null = null;
 let dashOffset = 0;
 let antsTimer: number | undefined;
 
+// A grip being dragged. Everything is reshaped from the originals each frame,
+// never from the frame before, so nothing drifts however long the drag runs.
+interface Reshape {
+  kind: 'transform';
+  from: Rect; // the selection's box when the grip was taken
+  to: Rect; // where the box has been dragged
+  anchor: Point; // the grip across from the one in hand
+  mode: GripMode;
+  cursor: string;
+  strokes: Stroke[]; // the originals
+  images: Map<string, Rect>; // each picture's rectangle at the start
+  preview: Map<string, Stroke>; // reshaped copies standing in on screen
+  stale: boolean; // `to` has moved since the preview was built
+  // Too much ink to rebuild at pointer speed: the originals are drawn through
+  // a stretched canvas instead, and rebuilt once, when the drag ends.
+  affine: boolean;
+}
+
 type Drag =
   | { kind: 'draw' }
   | { kind: 'erase' }
   | { kind: 'lasso' }
   | { kind: 'move'; startX: number; startY: number }
   | { kind: 'region'; x0: number; y0: number }
-  | { kind: 'resize'; id: string; anchor: Point; from: Rect; mode: GripMode }
+  | Reshape
   | { kind: 'pan'; startX: number; startY: number; camX: number; camY: number };
 let drag: Drag | null = null;
 let activePointer: number | null = null;
+
+// Where the pointer last was over the board, in css pixels. The loupe follows
+// it, and a paste with no drop point of its own lands under it.
+let lastPointer: Point | null = null;
+// The picker can be a tool you switch to or a key you lean on; either way the
+// magnifier comes up and the next click takes the colour.
+let pickerHeld = false;
+let pickedFrom: Tool | null = null; // tool to fall back to once a pick is made
 
 let cssWidth = 0;
 let cssHeight = 0;
@@ -119,17 +198,25 @@ const $ = (id: string) => document.getElementById(id)!;
 // lit, so it is tracked separately.
 const toolButtons: Record<Exclude<Tool, 'pen'>, HTMLElement> = {
   eraser: $('tool-eraser'),
+  fill: $('tool-fill'),
   select: $('tool-select'),
   wand: $('tool-wand'),
+  picker: $('tool-picker'),
   ask: $('tool-ask'),
   hand: $('tool-hand'),
 };
+const toolSettings = $('tool-settings');
 const eraserModes = $('eraser-modes');
 const eraserModeButtons = [...eraserModes.querySelectorAll<HTMLButtonElement>('[data-eraser-mode]')];
 const wandModes = $('wand-modes');
 const wandModeButtons = [...wandModes.querySelectorAll<HTMLButtonElement>('[data-wand-mode]')];
 const wandToleranceInput = $('wand-tolerance') as HTMLInputElement;
+const fillModes = $('fill-modes');
+const fillModeButtons = [...fillModes.querySelectorAll<HTMLButtonElement>('[data-fill-mode]')];
+const fillToleranceInput = $('fill-tolerance') as HTMLInputElement;
 const wandActions = $('wand-actions');
+const selActions = $('sel-actions');
+const selHint = $('sel-hint');
 const welcomeEl = $('welcome');
 const brushButtons: Record<BrushId, HTMLElement> = {
   pen: $('tool-pen'),
@@ -137,11 +224,42 @@ const brushButtons: Record<BrushId, HTMLElement> = {
   marker: $('brush-marker'),
   paint: $('brush-paint'),
   chalk: $('brush-chalk'),
+  liner: $('brush-liner'),
 };
 const swatchesEl = $('swatches');
-const colorInput = $('color-input') as HTMLInputElement;
+const colorChip = $('color-chip');
+const colorChipDot = $('color-chip-dot');
+const sizeChip = $('size-chip');
+const sizeChipLabel = $('size-chip-label');
 const sizeInput = $('size-input') as HTMLInputElement;
+const sizeNumber = $('size-number') as HTMLInputElement;
+const sizeReadout = $('size-readout');
+const sizePad = $('size-pad') as HTMLCanvasElement;
 const sizeDot = $('size-dot');
+const scrim = $('scrim');
+const colorPop = $('color-pop');
+const svCanvas = $('cp-sv') as HTMLCanvasElement;
+const hueInput = $('cp-hue') as HTMLInputElement;
+const cpPreview = $('cp-preview');
+const cpHex = $('cp-hex') as HTMLInputElement;
+const cpR = $('cp-r') as HTMLInputElement;
+const cpG = $('cp-g') as HTMLInputElement;
+const cpB = $('cp-b') as HTMLInputElement;
+const cpRecent = $('cp-recent');
+const cpPick = $('cp-pick');
+const recentBtn = $('recent-btn');
+const recentPop = $('recent-pop');
+const recentGrid = $('recent-grid');
+const sizePop = $('size-pop');
+const loupeEl = $('loupe');
+const loupeCanvas = $('loupe-canvas') as HTMLCanvasElement;
+const loupeSwatch = $('loupe-swatch');
+const loupeHex = $('loupe-hex');
+const stickersPanel = $('stickers');
+const stickersBtn = $('stickers-btn');
+const stickerList = $('sticker-list');
+const stickersEmpty = $('stickers-empty');
+const toastEl = $('toast');
 const undoBtn = $('undo') as HTMLButtonElement;
 const redoBtn = $('redo') as HTMLButtonElement;
 const gridBtn = $('grid-btn');
@@ -177,10 +295,13 @@ function requestRender(): void {
   dirty = true;
   requestAnimationFrame(() => {
     dirty = false;
+    syncSelectionBar();
+    const reshape = drag?.kind === 'transform' ? drag : null;
+    if (reshape) refreshReshape(reshape);
     const frame = board.activeFrame;
     const strokes = board.strokes.flatMap((stroke) => {
       if (stroke.frame !== frame || erasePending.has(stroke.id)) return [];
-      return areaEraseChanges.get(stroke.id)?.after ?? [stroke];
+      return areaEraseChanges.get(stroke.id)?.after ?? [reshape?.preview.get(stroke.id) ?? stroke];
     });
     render(ctx, canvas, camera, strokes, {
       theme: THEMES[themeName],
@@ -193,15 +314,7 @@ function requestRender(): void {
       marquee: lasso
         ? { poly: lasso, ids: null, dx: 0, dy: 0, dashOffset }
         : selection
-          ? {
-            poly: selection.poly,
-            ids: selection.ids,
-            imageIds: selection.images,
-            grips: selectionGrips(),
-            dx: moveX,
-            dy: moveY,
-            dashOffset,
-          }
+          ? selectionMarquee(selection)
           : null,
       layers: board.layers,
       activeLayer: board.activeLayer,
@@ -229,18 +342,43 @@ let autosaveTimer: number | undefined;
 function scheduleAutosave(): void {
   clearTimeout(autosaveTimer);
   autosaveTimer = window.setTimeout(() => {
-    void window.betterboard.autosave(board.serialize(camera));
+    void window.betterboard.autosave(board.serialize(fileCamera()));
   }, 800);
 }
 
+const TOOLS: Tool[] = ['pen', 'eraser', 'fill', 'select', 'wand', 'picker', 'ask', 'hand'];
+
 function savePrefs(): void {
-  localStorage.setItem('bb:prefs', JSON.stringify({ tool, brush, color, size, themeName, grid, eraserMode, wandMode, wandTolerance, layersOpen, timelineOpen, loop }));
+  localStorage.setItem(
+    'bb:prefs',
+    JSON.stringify({
+      tool,
+      brush,
+      color,
+      size,
+      themeName,
+      grid,
+      eraserMode,
+      wandMode,
+      wandTolerance,
+      fillMode,
+      fillTolerance,
+      layersOpen,
+      stickersOpen,
+      timelineOpen,
+      loop,
+      dockSide,
+      recent,
+    })
+  );
 }
 
 function loadPrefs(): void {
   try {
     const p = JSON.parse(localStorage.getItem('bb:prefs') ?? '{}');
-    if (['pen', 'eraser', 'select', 'wand', 'ask', 'hand'].includes(p.tool)) tool = p.tool;
+    // The picker is a momentary thing, not a place to be left standing on a
+    // fresh launch with a magnifier stuck to the pointer.
+    if (TOOLS.includes(p.tool) && p.tool !== 'picker') tool = p.tool;
     if (isBrush(p.brush)) brush = p.brush;
     if (typeof p.color === 'string') color = p.color;
     if (Number.isFinite(p.size)) size = Math.min(28, Math.max(1, p.size));
@@ -249,9 +387,14 @@ function loadPrefs(): void {
     if (p.eraserMode === 'stroke' || p.eraserMode === 'area') eraserMode = p.eraserMode;
     if (p.wandMode === 'point' || p.wandMode === 'background') wandMode = p.wandMode;
     if (Number.isFinite(p.wandTolerance)) wandTolerance = Math.min(120, Math.max(0, p.wandTolerance));
+    if (p.fillMode === 'region' || p.fillMode === 'similar') fillMode = p.fillMode;
+    if (Number.isFinite(p.fillTolerance)) fillTolerance = Math.min(120, Math.max(0, p.fillTolerance));
     if (typeof p.layersOpen === 'boolean') layersOpen = p.layersOpen;
+    if (typeof p.stickersOpen === 'boolean') stickersOpen = p.stickersOpen;
     if (typeof p.timelineOpen === 'boolean') timelineOpen = p.timelineOpen;
     if (typeof p.loop === 'boolean') loop = p.loop;
+    if (isDockSide(p.dockSide)) dockSide = p.dockSide;
+    if (Array.isArray(p.recent)) recent = p.recent.filter((c: unknown) => typeof c === 'string').slice(0, 24);
   } catch {}
 }
 
@@ -289,10 +432,11 @@ function zoomFit(): void {
   camera.rotation = 0; // fit re-frames everything axis-aligned
   updateWheel();
   const b = board.contentBBox(board.visibleStrokes(), board.visibleImages());
+  // Placed by anchoring rather than by arithmetic on the corner, so it lands
+  // centred whether or not the view is mirrored.
   if (!b) {
     camera.scale = 1;
-    camera.x = -cssWidth / 2;
-    camera.y = -cssHeight / 2;
+    anchorCamera(camera, { x: 0, y: 0 }, cssWidth / 2, cssHeight / 2);
   } else {
     const pad = 80;
     const w = Math.max(b.maxX - b.minX, 1);
@@ -300,8 +444,7 @@ function zoomFit(): void {
     camera.scale = clampScale(
       Math.min((cssWidth - pad * 2) / w, (cssHeight - pad * 2) / h, 4)
     );
-    camera.x = (b.minX + b.maxX) / 2 - cssWidth / (2 * camera.scale);
-    camera.y = (b.minY + b.maxY) / 2 - cssHeight / (2 * camera.scale);
+    anchorCamera(camera, { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 }, cssWidth / 2, cssHeight / 2);
   }
   updateZoomLabel();
   requestRender();
@@ -366,16 +509,18 @@ function afterEdit(moved: { ids: string[]; dx: number; dy: number } | null, kind
   const sel = selection;
   if (!sel) return;
   if (moved && moved.ids.length === sel.ids.size && moved.ids.every((id) => sel.ids.has(id))) {
-    sel.poly = sel.poly.map((p) => ({ x: p.x + moved.dx, y: p.y + moved.dy }));
+    shiftSelection(sel, moved.dx, moved.dy);
     requestRender();
     return;
   }
-  // Undoing a resize leaves the picture selected — only its rectangle changed,
-  // so the outline is re-derived rather than thrown away.
-  if (kind === 'image-resize' && sel.images.size === 1 && sel.ids.size === 0) {
-    const image = board.images.find((im) => im.id === [...sel.images][0]);
-    if (image) {
-      sel.poly = rectPoly(imageBBox(image));
+  // A reshape keeps every id it touched, so undoing or redoing one leaves the
+  // selection good — only its box changed, and the outline follows the box.
+  if (kind === 'transform') {
+    sel.box = undefined; // measured afresh from the ink it now holds
+    const box = selectionBox();
+    if (box) {
+      sel.loop = false;
+      sel.poly = boxPoly(box);
       requestRender();
       return;
     }
@@ -444,9 +589,47 @@ rotWheel.addEventListener('pointerup', endRotDrag);
 rotWheel.addEventListener('pointercancel', endRotDrag);
 rotWheel.addEventListener('dblclick', () => setRotation(0));
 
+// ---- mirrored view ----------------------------------------------------------
+
+// Flipping is how an artist catches what their eye has stopped seeing: a lean,
+// a face drifting to one side, an arm too long. It changes only how the board
+// is looked at — strokes, exports and saved files all stay the right way round.
+const flipBtn = $('flip-btn');
+const flipBadge = $('flip-badge');
+let flippedBy: 'h' | 'v' = 'h'; // so the badge undoes whichever flip is showing
+
+function flipView(axis: 'h' | 'v'): void {
+  if (drag || live) return; // the pointer's world position would jump mid-gesture
+  if (!camera.flip) flippedBy = axis;
+  mirrorView(camera, cssWidth / 2, cssHeight / 2, axis);
+  syncFlip();
+  updateWheel();
+  requestRender();
+  if (!camera.flip) toast('Canvas flipped back');
+  else toast(axis === 'h' ? 'Canvas flipped — M flips it back' : 'Canvas flipped upside down — ⇧M flips it back');
+}
+
+function syncFlip(): void {
+  flipBtn.classList.toggle('active', camera.flip === true);
+  flipBadge.classList.toggle('hidden', !camera.flip);
+}
+
+// A file never records a mirrored view. It writes down the same spot the right
+// way round, so a board always reopens reading correctly.
+function fileCamera(): Camera {
+  if (!camera.flip) return camera;
+  const unflipped = { ...camera };
+  mirrorView(unflipped, cssWidth / 2, cssHeight / 2, flippedBy);
+  return unflipped;
+}
+
+flipBtn.addEventListener('click', () => flipView('h'));
+flipBadge.addEventListener('click', () => flipView(flippedBy));
+
 // ---- ui sync --------------------------------------------------------------
 
 function setTool(t: Tool): void {
+  const previous = tool;
   tool = t;
   for (const [name, el] of Object.entries(toolButtons)) {
     el.classList.toggle('active', name === t);
@@ -454,9 +637,16 @@ function setTool(t: Tool): void {
   syncBrushButtons();
   eraserModes.classList.toggle('hidden', t !== 'eraser');
   wandModes.classList.toggle('hidden', t !== 'wand');
+  fillModes.classList.toggle('hidden', t !== 'fill');
+  toolSettings.classList.toggle('hidden', t !== 'eraser' && t !== 'wand' && t !== 'fill');
+  placeToolSettings();
   if (t !== 'eraser') eraserCursor = null;
   if (t !== 'select') clearSelection(); // also drops any wand selection
   else clearWandSelection(); // the lasso survives, but the wand mask belongs to its tool
+  // Leaving the picker by any route other than taking a colour drops the loupe
+  // and the memory of where it was meant to go back to.
+  if (t !== 'picker' && previous === 'picker') pickedFrom = null;
+  syncPicker();
   updateCursor();
   savePrefs();
   requestRender();
@@ -470,6 +660,17 @@ function setWandMode(mode: WandMode): void {
   toolButtons.wand.title = mode === 'point'
     ? 'Magic wand (W) — click a picture to select its color region'
     : 'Magic wand (W) — click a picture to select its whole background';
+  savePrefs();
+}
+
+function setFillMode(mode: FillMode): void {
+  fillMode = mode;
+  for (const button of fillModeButtons) {
+    button.classList.toggle('active', button.dataset.fillMode === mode);
+  }
+  toolButtons.fill.title = mode === 'region'
+    ? 'Fill (F) — click a closed shape to flood it with the current colour'
+    : 'Fill (F) — recolours every matching pixel in view, connected or not';
   savePrefs();
 }
 
@@ -498,13 +699,27 @@ function setBrush(id: BrushId): void {
   savePrefs();
 }
 
-function setColor(c: string): void {
+function setColor(c: string, remember = false): void {
   color = c;
-  colorInput.value = c;
+  colorChipDot.style.background = c;
+  colorChip.title = `Colour ${c.toUpperCase()} — click to open the picker`;
   for (const el of swatchesEl.children) {
-    el.classList.toggle('active', (el as HTMLElement).dataset.color === c);
+    el.classList.toggle('active', (el as HTMLElement).dataset.color?.toLowerCase() === c.toLowerCase());
   }
+  if (remember) {
+    recent = pushRecent(recent, c);
+    renderRecents();
+  }
+  syncPickerFields();
   savePrefs();
+}
+
+// The size the brush actually paints, which is not the number on the slider:
+// every brush scales it differently, and telling someone "6" when the marker
+// lays down ten board pixels is the kind of small lie that makes a slider
+// feel untrustworthy.
+function brushPixels(v = size, id: BrushId = brush): number {
+  return Math.max(1, Math.round(v * BRUSHES[id].sizeScale));
 }
 
 function setSize(v: number): void {
@@ -513,6 +728,12 @@ function setSize(v: number): void {
   sizeDot.style.width = `${d}px`;
   sizeDot.style.height = `${d}px`;
   sizeDot.style.borderRadius = brush === 'pixel' ? '2px' : '50%';
+  const px = brushPixels();
+  sizeChipLabel.innerHTML = `${px}<i>px</i>`;
+  sizeReadout.textContent = `${px} px · ${BRUSHES[brush].label}`;
+  if (document.activeElement !== sizeInput) sizeInput.value = String(v);
+  if (document.activeElement !== sizeNumber) sizeNumber.value = String(v);
+  syncSlider(sizeInput);
   savePrefs();
 }
 
@@ -538,7 +759,8 @@ function updateUndoButtons(): void {
 function updateCursor(): void {
   if (drag?.kind === 'pan') canvas.style.cursor = 'grabbing';
   else if (drag?.kind === 'move') canvas.style.cursor = 'grabbing';
-  else if (drag?.kind === 'resize') canvas.style.cursor = drag.mode === 'x' ? 'ew-resize' : drag.mode === 'y' ? 'ns-resize' : 'nwse-resize';
+  else if (drag?.kind === 'transform') canvas.style.cursor = drag.cursor;
+  else if (pickerActive()) canvas.style.cursor = 'none'; // the loupe is the cursor
   else if (tool === 'select' && hoverHandle) canvas.style.cursor = hoverHandle;
   else if (spaceHeld || tool === 'hand') canvas.style.cursor = 'grab';
   else if (tool === 'eraser') canvas.style.cursor = 'none';
@@ -922,6 +1144,7 @@ function setTimelineOpen(open: boolean): void {
     stopPlayback();
     onionPanel.classList.add('hidden');
   }
+  stackRightPanels();
   savePrefs();
   resizeCanvas();
   renderTimeline();
@@ -936,6 +1159,7 @@ function syncOnionPanel(): void {
   $('onion-before-val').textContent = String(o.before);
   $('onion-after-val').textContent = String(o.after);
   $('onion-opacity-val').textContent = `${Math.round(o.opacity * 100)}%`;
+  syncSliders(); // the tracks are painted from the value, so set both together
 }
 
 function gotoFrame(delta: number): void {
@@ -1070,7 +1294,9 @@ function renderLayers(): void {
   const active = board.active;
   layerOpacityInput.value = String(Math.round(active.opacity * 100));
   layerOpacityVal.textContent = `${Math.round(active.opacity * 100)}%`;
+  syncSlider(layerOpacityInput);
   layerDeleteBtn.disabled = board.layers.length <= 1;
+  stackRightPanels(); // a layer added or removed changes where the tray starts
 }
 
 function startRename(row: HTMLElement, id: string, current: string): void {
@@ -1141,6 +1367,10 @@ function setLayersOpen(open: boolean): void {
   layersOpen = open;
   layersPanel.classList.toggle('hidden', !open);
   layersBtn.classList.toggle('active', open);
+  // Both right-hand panels share an edge; the class lets the stickers tray
+  // step out of the way when layers is up.
+  document.body.classList.toggle('layers-open', open);
+  stackRightPanels();
   savePrefs();
 }
 
@@ -1664,85 +1894,150 @@ function selectImage(image: BoardImage): void {
   requestRender();
 }
 
-// The eight grips of the selected picture: four corners, then four edge
-// midpoints (top, right, bottom, left). Corners scale; edges stretch one axis.
-function selectionGrips(): Point[] | null {
-  const sel = selection;
-  if (!sel || sel.ids.size > 0 || sel.images.size !== 1) return null;
-  const image = board.images.find((im) => im.id === [...sel.images][0]);
-  if (!image) return null;
-  const b = imageBBox(image);
-  const cx = (b.minX + b.maxX) / 2;
-  const cy = (b.minY + b.maxY) / 2;
-  return [
-    { x: b.minX, y: b.minY },
-    { x: b.maxX, y: b.minY },
-    { x: b.maxX, y: b.maxY },
-    { x: b.minX, y: b.maxY },
-    { x: cx, y: b.minY },
-    { x: b.maxX, y: cy },
-    { x: cx, y: b.maxY },
-    { x: b.minX, y: cy },
-  ];
+// ---- reshaping a selection --------------------------------------------------
+
+// The box a selection's grips sit on: everything it holds, ink margins and all
+// — or, once it has been reshaped, the box exactly as it was let go. Measuring
+// the ink again would pull the grips in from under the pointer, anchored edge
+// included, because a line's width follows a stretch less than its length does.
+function selectionBox(): Rect | null {
+  if (selection?.box) return selection.box;
+  const box = board.contentBBox(selectedStrokes(), selectedImages());
+  return box ? bboxRect(box) : null;
 }
 
-type GripMode = 'corner' | 'x' | 'y';
+function shiftSelection(sel: BoardSelection, dx: number, dy: number): void {
+  sel.poly = sel.poly.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+  if (sel.box) sel.box = { ...sel.box, x: sel.box.x + dx, y: sel.box.y + dy };
+}
 
-// Which grip, if any, is under a screen point. Corners pivot around the
-// opposite corner; edges stretch on one axis about the opposite edge.
-function handleAt(sx: number, sy: number): { image: BoardImage; anchor: Point; mode: GripMode } | null {
-  if (!selection || selection.images.size !== 1 || selection.ids.size > 0) return null;
-  const image = board.images.find((im) => im.id === [...selection!.images][0]);
-  if (!image) return null;
-  const corners = selectionGrips();
-  if (!corners) return null;
-  // Opposite grip for each index above: corners mirror across the center,
-  // edges mirror to the opposite edge.
-  const opposite = [2, 3, 0, 1, 6, 7, 4, 5];
-  for (let i = 0; i < corners.length; i++) {
-    const p = toScreen(camera, corners[i].x, corners[i].y);
-    if (Math.abs(p.x - sx) <= HANDLE && Math.abs(p.y - sy) <= HANDLE) {
-      const mode: GripMode = i < 4 ? 'corner' : i % 2 === 1 ? 'x' : 'y';
-      return { image, anchor: corners[opposite[i]], mode };
+function boxPoly(r: Rect): Point[] {
+  return rectPoly({ minX: r.x, minY: r.y, maxX: r.x + r.width, maxY: r.y + r.height });
+}
+
+// The grips worth showing on a box, by their index into boxGrips. An edge grip
+// drops out when its side is too short on screen to hold one between the
+// corners, which leaves a small selection four grips instead of a clump.
+// `shown` is the box as it is on screen now — mid-drag, not the one the grips
+// are measured from.
+function gripsOf(box: Rect, shown: Rect = box): { i: number; p: Point }[] {
+  const a = toScreen(camera, shown.x, shown.y);
+  const b = toScreen(camera, shown.x + shown.width, shown.y);
+  const c = toScreen(camera, shown.x, shown.y + shown.height);
+  const across = Math.hypot(b.x - a.x, b.y - a.y) >= HANDLE * 3;
+  const down = Math.hypot(c.x - a.x, c.y - a.y) >= HANDLE * 3;
+  return boxGrips(box).flatMap((p, i) => {
+    const mode = gripMode(i);
+    // Left and right grips sit halfway down a side, top and bottom halfway across.
+    const fits = mode === 'corner' || (mode === 'x' ? down : across);
+    return fits ? [{ i, p }] : [];
+  });
+}
+
+// Which grip, if any, is under a screen point: the box it belongs to, what it
+// does, the point across the box that holds still, and the cursor for it.
+function gripAt(sx: number, sy: number): { box: Rect; anchor: Point; mode: GripMode; cursor: string } | null {
+  if (!selection) return null;
+  const box = selectionBox();
+  if (!box) return null;
+  const all = boxGrips(box);
+  const centre = toScreen(camera, box.x + box.width / 2, box.y + box.height / 2);
+  for (const { i, p } of gripsOf(box)) {
+    const s = toScreen(camera, p.x, p.y);
+    if (Math.abs(s.x - sx) <= HANDLE && Math.abs(s.y - sy) <= HANDLE) {
+      return { box, anchor: all[OPPOSITE[i]], mode: gripMode(i), cursor: resizeCursor(s.x - centre.x, s.y - centre.y) };
     }
   }
   return null;
 }
 
-const MIN_IMAGE = 8; // world units
+const MIN_BOX = 6; // css px: the smallest a selection can be squeezed to on screen
+// Rebuilding a selection's strokes costs time in proportion to its ink. Past
+// this many milliseconds in one frame, a drag stops rebuilding live.
+const RESHAPE_BUDGET = 24;
 
-// Scales about the anchored corner. Corners keep proportions unless `free`
-// (Shift); edge grips stretch a single axis about the opposite edge.
-function resizeRect(from: Rect, anchor: Point, w: Point, mode: GripMode, free: boolean): Rect {
-  if (mode === 'x') {
-    const width = Math.max(MIN_IMAGE, Math.abs(w.x - anchor.x));
-    return { x: Math.min(anchor.x, w.x), y: from.y, width, height: from.height };
-  }
-  if (mode === 'y') {
-    const height = Math.max(MIN_IMAGE, Math.abs(w.y - anchor.y));
-    return { x: from.x, y: Math.min(anchor.y, w.y), width: from.width, height };
-  }
-  const dx = w.x - anchor.x;
-  const dy = w.y - anchor.y;
-  if (free) {
-    const width = Math.max(MIN_IMAGE, Math.abs(dx));
-    const height = Math.max(MIN_IMAGE, Math.abs(dy));
-    return {
-      x: dx < 0 ? anchor.x - width : anchor.x,
-      y: dy < 0 ? anchor.y - height : anchor.y,
-      width,
-      height,
-    };
-  }
-  const k = Math.max(Math.abs(dx) / from.width, Math.abs(dy) / from.height);
-  const width = Math.max(MIN_IMAGE, from.width * k);
-  const height = Math.max(MIN_IMAGE, from.height * k);
+function beginReshape(grip: NonNullable<ReturnType<typeof gripAt>>): Reshape {
+  const images = new Map<string, Rect>();
+  for (const im of selectedImages()) images.set(im.id, { x: im.x, y: im.y, width: im.width, height: im.height });
   return {
-    x: dx < 0 ? anchor.x - width : anchor.x,
-    y: dy < 0 ? anchor.y - height : anchor.y,
-    width,
-    height,
+    kind: 'transform',
+    from: grip.box,
+    to: grip.box,
+    anchor: grip.anchor,
+    mode: grip.mode,
+    cursor: grip.cursor,
+    strokes: selectedStrokes(),
+    images,
+    preview: new Map(),
+    stale: false,
+    affine: false,
   };
+}
+
+// Brings the on-screen preview up to the latest `to`, once per frame however
+// many pointer events arrived. Pictures are resized in place — a rectangle is
+// cheap — and put back before the edit is recorded.
+function refreshReshape(t: Reshape): void {
+  if (!t.stale) return;
+  t.stale = false;
+  for (const [id, r] of t.images) {
+    const image = board.images.find((im) => im.id === id);
+    if (image) Object.assign(image, transformRect(r, t.from, t.to));
+  }
+  if (t.affine) return;
+  const started = performance.now();
+  for (const s of t.strokes) t.preview.set(s.id, transformStroke(s, t.from, t.to));
+  if (performance.now() - started > RESHAPE_BUDGET) {
+    t.affine = true;
+    t.preview.clear();
+  }
+}
+
+function commitReshape(t: Reshape): void {
+  for (const [id, r] of t.images) {
+    const image = board.images.find((im) => im.id === id);
+    if (image) Object.assign(image, r);
+  }
+  const { from, to } = t;
+  if (from.x === to.x && from.y === to.y && from.width === to.width && from.height === to.height) return;
+  board.transformItems(
+    t.strokes.map((s) => transformStroke(s, from, to)),
+    [...t.images].map(([id, r]) => ({ id, to: transformRect(r, from, to) }))
+  );
+  const sel = selection;
+  if (!sel) return;
+  sel.box = to;
+  // A lasso outline is carried along with what it holds; a box outline is the box.
+  sel.poly = sel.loop ? sel.poly.map((p) => mapPoint(p, from, to)) : boxPoly(to);
+}
+
+// The outline, grips and in-flight change for the selection, this frame.
+function selectionMarquee(sel: BoardSelection): Marquee {
+  const t = drag?.kind === 'transform' ? drag : null;
+  const box = t ? t.from : selectionBox();
+  const map = t ? boxAffine(t.from, t.to) : { sx: 1, sy: 1, dx: moveX, dy: moveY };
+  return {
+    poly: sel.loop || !box ? sel.poly : boxPoly(box),
+    // A move lifts everything into the shifted pass. A reshape shows rebuilt
+    // copies instead and resizes pictures in place, so only ink too heavy to
+    // rebuild live goes through the stretched pass.
+    ids: t ? (t.affine ? sel.ids : null) : sel.ids,
+    imageIds: t ? null : sel.images,
+    grips: box ? gripsOf(box, t ? t.to : box).map((g) => g.p) : null,
+    frame: sel.loop === true,
+    ...map,
+    dashOffset,
+  };
+}
+
+// Inside the outline or inside the box the grips are on: a lasso loop can be
+// drawn tighter or looser than the ink, and either should pick it up.
+function insideSelection(w: Point): boolean {
+  const sel = selection;
+  if (!sel) return false;
+  if (pointInPolygon(sel.poly, w.x, w.y)) return true;
+  const box = selectionBox();
+  return box !== null && w.x >= box.x && w.x <= box.x + box.width && w.y >= box.y && w.y <= box.y + box.height;
 }
 
 function rectPoly(b: { minX: number; minY: number; maxX: number; maxY: number }): Point[] {
@@ -1779,7 +2074,7 @@ let lastPasteAt = 0;
 // runs its paste command for editable targets, so over the canvas nothing fires
 // at all. Since the accelerator is consumed, typing fields have to be served
 // too, which is what the text branch is for.
-async function pasteFromClipboard(): Promise<void> {
+async function pasteFromClipboard(fallback?: () => Promise<string | null>): Promise<void> {
   const now = Date.now();
   if (now - lastPasteAt < 300) return;
   // Claimed before the first await: reading the clipboard is asynchronous, so
@@ -1798,9 +2093,21 @@ async function pasteFromClipboard(): Promise<void> {
     return;
   }
 
-  const src = await window.betterboard.clipboardImage();
-  if (!src) return;
-  await placeImage(src);
+  // The board's own copy wins while the marker written beside it is still on
+  // the clipboard — that is what makes ⌘C then ⌘V give back real strokes rather
+  // than a flat snapshot of them. Copy anything else anywhere on the computer
+  // and the marker goes with it, so the outside world takes over again.
+  if (clipboard && clipMark && (await window.betterboard.clipboardText()) === clipMark) {
+    pasteClip(clipboard);
+    return;
+  }
+  const src = (await window.betterboard.clipboardImage()) ?? (await fallback?.());
+  if (src) {
+    await placeImage(src);
+    return;
+  }
+  // Nothing outside to paste, but ours is still good.
+  if (clipboard) pasteClip(clipboard);
 }
 
 // Kept as a second route: a real paste event still fires for drags out of other
@@ -1813,9 +2120,11 @@ window.addEventListener('paste', (e) => {
     const blob = item.getAsFile();
     if (!blob) continue;
     e.preventDefault();
-    if (Date.now() - lastPasteAt < 300) return;
-    lastPasteAt = Date.now();
-    void blobToDataURL(blob).then((src) => placeImage(src));
+    // Routed through the same function as the menu, so both routes make the
+    // same choice between the board's clipboard and the system's. The blob is
+    // handed over as a fallback for formats the platform clipboard cannot
+    // hand back as an image on its own.
+    void pasteFromClipboard(() => blobToDataURL(blob));
     return;
   }
 });
@@ -1828,15 +2137,30 @@ for (const type of ['dragover', 'drop'] as const) {
   });
 }
 
-// Dropping onto the canvas places the picture where it landed.
+// Dropping onto the canvas places the picture where it landed — and so does
+// dragging a sticker out of the tray, which is the same gesture for the same
+// reason.
 canvas.addEventListener('dragover', (e) => {
-  if (e.dataTransfer?.types.includes('Files')) {
+  const types = e.dataTransfer?.types;
+  if (types?.includes('Files') || types?.includes(STICKER_DRAG_TYPE)) {
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
+    e.dataTransfer!.dropEffect = 'copy';
   }
 });
 
 canvas.addEventListener('drop', (e) => {
+  const stickerId = e.dataTransfer?.getData(STICKER_DRAG_TYPE);
+  if (stickerId) {
+    e.preventDefault();
+    const sticker = stickers.find((s) => s.id === stickerId);
+    if (!sticker) return;
+    const centre = toWorld(camera, e.offsetX, e.offsetY);
+    pasteClip(sticker.clip, {
+      x: centre.x - sticker.clip.width / 2,
+      y: centre.y - sticker.clip.height / 2,
+    });
+    return;
+  }
   const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'));
   if (files.length === 0) return;
   e.preventDefault();
@@ -1867,11 +2191,6 @@ function imagePixels(image: BoardImage): { data: Uint8ClampedArray; width: numbe
   return { data: c.getImageData(0, 0, width, height).data, width, height };
 }
 
-function hexToRgb(hex: string): [number, number, number] {
-  const n = parseInt(hex.slice(1), 16);
-  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
-}
-
 // The selection made visible: a soft accent tint over the chosen pixels and a
 // solid rim just outside them, baked into one canvas the renderer stretches
 // over the picture.
@@ -1882,7 +2201,7 @@ function buildWandOverlay(mask: Uint8Array, width: number, height: number): HTML
   const c = canvas.getContext('2d')!;
   const rim = dilate(mask, width, height);
   const img = c.createImageData(width, height);
-  const [r, g, b] = hexToRgb(THEMES[themeName].accent);
+  const { r, g, b } = hexToRgb(THEMES[themeName].accent) ?? { r: 76, g: 201, b: 240 };
   for (let p = 0; p < mask.length; p++) {
     const o = p * 4;
     if (mask[p]) {
@@ -2107,13 +2426,12 @@ function commitLasso(): void {
     selection = image ? { ids, images: pics, poly: rectPoly(imageBBox(image)) } : null;
     return;
   }
-  selection = ids.size > 0 || pics.size > 0 ? { ids, images: pics, poly } : null;
+  selection = ids.size > 0 || pics.size > 0 ? { ids, images: pics, poly, loop: true } : null;
 }
 
 function deleteSelection(): void {
   if (!selection) return;
-  board.removeStrokes(selection.ids);
-  board.removeImages(selection.images);
+  board.removeItems(selection.ids, selection.images);
   clearSelection();
 }
 
@@ -2121,6 +2439,13 @@ function deleteSelection(): void {
 
 canvas.addEventListener('pointerdown', (e) => {
   if (drag) return; // ignore extra pointers mid-gesture
+  // A pick is the whole gesture: it takes the pixel under the pointer and hands
+  // the tool back, without ever touching the board.
+  if (pickerActive() && e.button === 0) {
+    lastPointer = { x: e.offsetX, y: e.offsetY };
+    takeColorAt(e.offsetX, e.offsetY);
+    return;
+  }
   if (playing) {
     // Playback is a preview; the press stops it and returns to the frame you
     // were editing rather than drawing onto whichever frame happened to show.
@@ -2152,18 +2477,16 @@ canvas.addEventListener('pointerdown', (e) => {
     // A wand pick is a click, not a drag: select and end the gesture here.
     wandAt(e);
     return;
+  } else if (tool === 'fill' && e.button === 0) {
+    // So is a bucket drop.
+    fillAt(e);
+    return;
   } else if (tool === 'select' && e.button === 0) {
     const w = toWorld(camera, e.offsetX, e.offsetY);
-    const grip = handleAt(e.offsetX, e.offsetY);
+    const grip = gripAt(e.offsetX, e.offsetY);
     if (grip) {
-      drag = {
-        kind: 'resize',
-        id: grip.image.id,
-        anchor: grip.anchor,
-        mode: grip.mode,
-        from: { x: grip.image.x, y: grip.image.y, width: grip.image.width, height: grip.image.height },
-      };
-    } else if (selection && pointInPolygon(selection.poly, w.x, w.y)) {
+      drag = beginReshape(grip);
+    } else if (selection && insideSelection(w)) {
       // Press inside the outline picks the selection up instead of redrawing it.
       drag = { kind: 'move', startX: e.clientX, startY: e.clientY };
       moveX = 0;
@@ -2189,15 +2512,19 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
+  lastPointer = { x: e.offsetX, y: e.offsetY };
+  if (pickerActive()) {
+    drawLoupe(e.offsetX, e.offsetY);
+    return;
+  }
   if (drag === null || e.pointerId !== activePointer) {
     if (tool === 'eraser') {
       eraserCursor = { x: e.offsetX, y: e.offsetY };
       requestRender();
     } else if (tool === 'select' && selection) {
       const w = toWorld(camera, e.offsetX, e.offsetY);
-      const inside = pointInPolygon(selection.poly, w.x, w.y);
-      const grip = handleAt(e.offsetX, e.offsetY);
-      const onGrip = grip ? (grip.mode === 'x' ? 'ew-resize' : grip.mode === 'y' ? 'ns-resize' : 'nwse-resize') : null;
+      const inside = insideSelection(w);
+      const onGrip = gripAt(e.offsetX, e.offsetY)?.cursor ?? null;
       if (inside !== hoverInSelection || onGrip !== hoverHandle) {
         hoverInSelection = inside;
         hoverHandle = onGrip;
@@ -2206,18 +2533,17 @@ canvas.addEventListener('pointermove', (e) => {
     }
     return;
   }
-  if (drag.kind === 'resize') {
-    const resize = drag;
-    const image = board.images.find((im) => im.id === resize.id);
-    if (image) {
-      const r = resizeRect(resize.from, resize.anchor, toWorld(camera, e.offsetX, e.offsetY), resize.mode, e.shiftKey);
-      image.x = r.x;
-      image.y = r.y;
-      image.width = r.width;
-      image.height = r.height;
-      if (selection) selection.poly = rectPoly(imageBBox(image));
-      requestRender();
-    }
+  if (drag.kind === 'transform') {
+    // Shift frees a corner's proportions; Option grows the box about its middle.
+    const t = drag;
+    const centre = { x: t.from.x + t.from.width / 2, y: t.from.y + t.from.height / 2 };
+    t.to = resizeRect(t.from, e.altKey ? centre : t.anchor, toWorld(camera, e.offsetX, e.offsetY), t.mode, {
+      free: e.shiftKey,
+      centered: e.altKey,
+      min: MIN_BOX / camera.scale,
+    });
+    t.stale = true;
+    requestRender();
     return;
   }
   if (drag.kind === 'move') {
@@ -2238,12 +2564,9 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
   if (drag.kind === 'pan') {
-    const cos = Math.cos(camera.rotation);
-    const sin = Math.sin(camera.rotation);
-    const dx = e.clientX - drag.startX;
-    const dy = e.clientY - drag.startY;
-    camera.x = drag.camX - (dx * cos + dy * sin) / camera.scale;
-    camera.y = drag.camY - (-dx * sin + dy * cos) / camera.scale;
+    const d = toWorldDelta(camera, e.clientX - drag.startX, e.clientY - drag.startY);
+    camera.x = drag.camX - d.x;
+    camera.y = drag.camY - d.y;
     requestRender();
     scheduleAutosave();
     return;
@@ -2286,22 +2609,15 @@ function endGesture(e: PointerEvent): void {
     addLassoPoint(e);
     commitLasso();
     syncAnts();
-  } else if (drag.kind === 'resize') {
-    const resize = drag;
-    const image = board.images.find((im) => im.id === resize.id);
-    if (image) {
-      const to = { x: image.x, y: image.y, width: image.width, height: image.height };
-      Object.assign(image, resize.from); // rewind the preview so the op records both ends
-      board.resizeImage(resize.id, to);
-      if (selection) selection.poly = rectPoly(imageBBox(image));
-    }
+  } else if (drag.kind === 'transform') {
+    commitReshape(drag);
   } else if (drag.kind === 'region') {
     regionDrag = null;
     captureRegion(drag.x0, drag.y0, e.offsetX, e.offsetY);
   } else if (drag.kind === 'move' && selection) {
     // Commit once, as a single undo step, and carry the outline along with it.
     board.moveItems(selection.ids, selection.images, moveX, moveY);
-    selection.poly = selection.poly.map((p) => ({ x: p.x + moveX, y: p.y + moveY }));
+    shiftSelection(selection, moveX, moveY);
     moveX = 0;
     moveY = 0;
   }
@@ -2315,6 +2631,8 @@ function endGesture(e: PointerEvent): void {
 canvas.addEventListener('pointerup', endGesture);
 canvas.addEventListener('pointercancel', endGesture);
 canvas.addEventListener('pointerleave', () => {
+  lastPointer = null;
+  loupeEl.classList.add('hidden');
   if (eraserCursor && drag === null) {
     eraserCursor = null;
     requestRender();
@@ -2330,10 +2648,9 @@ canvas.addEventListener(
     if (e.ctrlKey || e.metaKey) {
       zoomAt(e.offsetX, e.offsetY, Math.exp(-e.deltaY * 0.01));
     } else {
-      const cos = Math.cos(camera.rotation);
-      const sin = Math.sin(camera.rotation);
-      camera.x += (e.deltaX * cos + e.deltaY * sin) / camera.scale;
-      camera.y += (-e.deltaX * sin + e.deltaY * cos) / camera.scale;
+      const d = toWorldDelta(camera, e.deltaX, e.deltaY);
+      camera.x += d.x;
+      camera.y += d.y;
       requestRender();
       scheduleAutosave();
     }
@@ -2356,6 +2673,16 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === 'Escape') {
+    if (openPops.length > 0) {
+      closeTopPop();
+      return;
+    }
+    if (pickerActive()) {
+      pickerHeld = false;
+      if (tool === 'picker') setTool(pickedFrom && pickedFrom !== 'picker' ? pickedFrom : 'pen');
+      else syncPicker();
+      return;
+    }
     if (!exportAnimEl.classList.contains('hidden')) {
       closeExportDialog();
       return;
@@ -2396,16 +2723,34 @@ window.addEventListener('keydown', (e) => {
     case '3':
     case '4':
     case '5':
-      setBrush(BRUSH_ORDER[Number(e.key) - 1]);
+    case '6': {
+      const picked = BRUSH_ORDER[Number(e.key) - 1];
+      if (picked) setBrush(picked);
       break;
+    }
     case 'e':
       setTool(tool === 'eraser' ? 'pen' : 'eraser');
+      break;
+    case 'f':
+      setTool(tool === 'fill' ? 'pen' : 'fill');
       break;
     case 's':
       setTool(tool === 'select' ? 'pen' : 'select');
       break;
     case 'w':
       setTool(tool === 'wand' ? 'pen' : 'wand');
+      break;
+    // Held down it is a momentary picker: lean on it, hover the colour you
+    // want, let go. Pressed while the tool is already on, it puts it away.
+    case 'i':
+      if (tool === 'picker') {
+        setTool(pickedFrom && pickedFrom !== 'picker' ? pickedFrom : 'pen');
+      } else if (!pickerHeld) {
+        pickerHeld = true;
+        pickedFrom = tool;
+        syncPicker();
+        updateCursor();
+      }
       break;
     case 'a':
       if (tool === 'ask') {
@@ -2433,6 +2778,9 @@ window.addEventListener('keydown', (e) => {
       sizeInput.value = String(Math.min(28, size + 1));
       sizeInput.dispatchEvent(new Event('input'));
       break;
+    case 'm':
+      if (!e.repeat) flipView(e.shiftKey ? 'v' : 'h');
+      break;
     case 'r':
       if (!rHeld) {
         rHeld = true;
@@ -2451,13 +2799,26 @@ window.addEventListener('keyup', (e) => {
     rHeld = false;
     updateWheel();
   }
+  // Letting go over the board is the pick. Letting go anywhere else just puts
+  // the magnifier away, so a stray press costs nothing.
+  if (e.key.toLowerCase() === 'i' && pickerHeld) {
+    if (lastPointer) takeColorAt(lastPointer.x, lastPointer.y);
+    else {
+      pickerHeld = false;
+      pickedFrom = null;
+      syncPicker();
+      updateCursor();
+    }
+  }
 });
 
 // A lost keyup (app switch mid-hold) must not leave the wheel stuck on screen.
 window.addEventListener('blur', () => {
   rHeld = false;
   spaceHeld = false;
+  pickerHeld = false;
   updateWheel();
+  syncPicker();
   updateCursor();
 });
 
@@ -2477,6 +2838,8 @@ async function newBoard(): Promise<void> {
   camera.y = -cssHeight / 2;
   camera.scale = 1;
   camera.rotation = 0;
+  camera.flip = false;
+  syncFlip();
   updateWheel();
   updateZoomLabel();
   requestRender();
@@ -2489,6 +2852,9 @@ async function openBoard(): Promise<void> {
   try {
     clearSelection();
     const saved = board.deserialize(json);
+    // A board always opens the right way round; see fileCamera.
+    camera.flip = false;
+    syncFlip();
     if (saved) {
       camera.x = saved.x;
       camera.y = saved.y;
@@ -2645,7 +3011,7 @@ window.betterboard.onMenu((action) => {
       void openBoard();
       break;
     case 'save':
-      void window.betterboard.saveBoard(board.serialize(camera));
+      void window.betterboard.saveBoard(board.serialize(fileCamera()));
       break;
     case 'export':
       void exportPNG();
@@ -2658,6 +3024,36 @@ window.betterboard.onMenu((action) => {
       break;
     case 'paste':
       void pasteFromClipboard();
+      break;
+    case 'copy':
+      copyAction(false);
+      break;
+    case 'cut':
+      copyAction(true);
+      break;
+    case 'duplicate':
+      duplicateAction();
+      break;
+    case 'select-all':
+      selectAll();
+      break;
+    case 'sticker-save':
+      saveSelectionAsSticker();
+      break;
+    case 'toggle-stickers':
+      setStickersOpen(!stickersOpen);
+      break;
+    case 'dock-top':
+      setDockSide('top');
+      break;
+    case 'dock-right':
+      setDockSide('right');
+      break;
+    case 'dock-bottom':
+      setDockSide('bottom');
+      break;
+    case 'dock-left':
+      setDockSide('left');
       break;
     case 'undo':
       doUndo();
@@ -2694,6 +3090,12 @@ window.betterboard.onMenu((action) => {
       gridBtn.classList.toggle('active', grid);
       savePrefs();
       requestRender();
+      break;
+    case 'flip-h':
+      flipView('h');
+      break;
+    case 'flip-v':
+      flipView('v');
       break;
     case 'toggle-theme':
       toggleTheme();
@@ -2771,6 +3173,13 @@ for (const id of BRUSH_ORDER) {
 }
 toolButtons.select.addEventListener('click', () => setTool('select'));
 toolButtons.wand.addEventListener('click', () => setTool('wand'));
+toolButtons.fill.addEventListener('click', () => setTool('fill'));
+// The picker button is a toggle, so pressing it a second time gives back the
+// tool you were on rather than stranding you on a magnifier.
+toolButtons.picker.addEventListener('click', () => {
+  if (tool === 'picker') setTool(pickedFrom && pickedFrom !== 'picker' ? pickedFrom : 'pen');
+  else startPicking();
+});
 for (const button of wandModeButtons) {
   button.addEventListener('click', () => setWandMode(button.dataset.wandMode as WandMode));
 }
@@ -2779,10 +3188,29 @@ wandToleranceInput.addEventListener('input', () => {
   $('wand-tolerance-val').textContent = String(wandTolerance);
   savePrefs();
 });
+for (const button of fillModeButtons) {
+  button.addEventListener('click', () => {
+    setFillMode(button.dataset.fillMode as FillMode);
+    placeToolSettings();
+  });
+}
+fillToleranceInput.addEventListener('input', () => {
+  fillTolerance = Number(fillToleranceInput.value);
+  $('fill-tolerance-val').textContent = String(fillTolerance);
+  savePrefs();
+});
 $('wand-cut').addEventListener('click', () => applyWandCut(false));
 $('wand-keep').addEventListener('click', () => applyWandCut(true));
 toolButtons.ask.addEventListener('click', () => setTool('ask'));
 toolButtons.hand.addEventListener('click', () => setTool('hand'));
+
+$('sel-duplicate').addEventListener('click', () => duplicateAction());
+$('sel-copy').addEventListener('click', () => copyAction(false));
+$('sel-sticker').addEventListener('click', saveSelectionAsSticker);
+$('sel-delete').addEventListener('click', deleteSelection);
+stickersBtn.addEventListener('click', () => setStickersOpen(!stickersOpen));
+$('stickers-close').addEventListener('click', () => setStickersOpen(false));
+$('sticker-add').addEventListener('click', saveSelectionAsSticker);
 
 // ---- welcome / workspace picker ---------------------------------------------
 
@@ -2837,16 +3265,13 @@ for (const c of SWATCHES) {
   btn.style.background = c;
   btn.title = c;
   btn.addEventListener('click', () => {
-    setColor(c);
-    if (tool !== 'pen') setTool('pen');
+    setColor(c, true);
+    // The bucket paints in the current colour too, so picking one should not
+    // drag you off it.
+    if (tool !== 'pen' && tool !== 'fill') setTool('pen');
   });
   swatchesEl.appendChild(btn);
 }
-
-colorInput.addEventListener('input', () => {
-  setColor(colorInput.value);
-  if (tool !== 'pen') setTool('pen');
-});
 
 sizeInput.addEventListener('input', () => setSize(Number(sizeInput.value)));
 
@@ -2865,23 +3290,1051 @@ $('zoom-out').addEventListener('click', () => zoomAt(cssWidth / 2, cssHeight / 2
 zoomLabel.addEventListener('click', () => zoomTo(1));
 normalizeBtn.addEventListener('click', normalize);
 
+// ---- small shared ui ------------------------------------------------------
+
+let toastTimer: number | undefined;
+function toast(message: string): void {
+  toastEl.textContent = message;
+  toastEl.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => toastEl.classList.add('hidden'), 2600);
+}
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+// Chromium has no way to paint the filled half of a range track, so every
+// slider carries its own percentage and the track is a gradient stop.
+function syncSlider(el: HTMLInputElement): void {
+  const min = Number(el.min || 0);
+  const max = Number(el.max || 100);
+  const pct = max === min ? 0 : ((Number(el.value) - min) / (max - min)) * 100;
+  el.style.setProperty('--pct', `${clamp(pct, 0, 100)}%`);
+}
+
+function syncSliders(): void {
+  for (const el of document.querySelectorAll<HTMLInputElement>('input[type="range"]')) syncSlider(el);
+}
+
+function wireSliders(): void {
+  for (const el of document.querySelectorAll<HTMLInputElement>('input[type="range"]')) {
+    el.addEventListener('input', () => syncSlider(el));
+  }
+  syncSliders();
+}
+
+// Backing store at device resolution, drawing coordinates in css pixels — the
+// picker's square and the loupe are both read closely enough that a soft
+// upscale would show.
+function sizeCanvas(el: HTMLCanvasElement, width: number, height: number): CanvasRenderingContext2D {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(width * dpr);
+  const h = Math.round(height * dpr);
+  if (el.width !== w || el.height !== h) {
+    el.width = w;
+    el.height = h;
+  }
+  const c = el.getContext('2d', { willReadFrequently: true })!;
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return c;
+}
+
+// ---- popovers -------------------------------------------------------------
+
+// Everything that hangs off the toolbar opens the same way: as a toggle, over
+// a scrim that swallows the click which closes it. That last part is the point
+// — dismissing the colour picker must never leave a dot on the board.
+const openPops: { el: HTMLElement; anchor: HTMLElement }[] = [];
+
+function popOpen(el: HTMLElement): boolean {
+  return openPops.some((open) => open.el === el);
+}
+
+function closePops(): void {
+  for (const open of openPops.splice(0)) open.el.classList.add('hidden');
+  scrim.classList.add('hidden');
+  syncPopAnchors();
+}
+
+function closeTopPop(): void {
+  const open = openPops.pop();
+  if (!open) return;
+  open.el.classList.add('hidden');
+  scrim.classList.toggle('hidden', openPops.length === 0);
+  syncPopAnchors();
+}
+
+function showPop(el: HTMLElement, anchor: HTMLElement): void {
+  // A popover opened from inside another one stacks; anything else replaces.
+  const nested = openPops.some((open) => open.el.contains(anchor));
+  if (!nested) closePops();
+  el.classList.remove('hidden');
+  openPops.push({ el, anchor });
+  placePop(el, anchor);
+  scrim.classList.remove('hidden');
+  syncPopAnchors();
+}
+
+// Anchored to whatever opened it, on whichever side of the dock leaves room.
+// An anchor inside another popover is measured where it actually is, which is
+// why the stack keeps the element rather than a rectangle taken at open time.
+function placePop(el: HTMLElement, anchor: HTMLElement): void {
+  const a = anchor.getBoundingClientRect();
+  el.style.visibility = 'hidden';
+  const p = el.getBoundingClientRect();
+  const gap = 10;
+  let left: number;
+  let top: number;
+  if (dockSide === 'left' || dockSide === 'right') {
+    top = a.top + a.height / 2 - p.height / 2;
+    left = dockSide === 'left' ? a.right + gap : a.left - p.width - gap;
+  } else {
+    left = a.left + a.width / 2 - p.width / 2;
+    top = dockSide === 'bottom' ? a.top - p.height - gap : a.bottom + gap;
+  }
+  el.style.left = `${clamp(left, 8, Math.max(8, window.innerWidth - p.width - 8))}px`;
+  el.style.top = `${clamp(top, 8, Math.max(8, window.innerHeight - p.height - 8))}px`;
+  el.style.visibility = '';
+}
+
+function placeOpenPops(): void {
+  for (const open of openPops) placePop(open.el, open.anchor);
+}
+
+function togglePop(el: HTMLElement, anchor: HTMLElement): void {
+  if (popOpen(el)) closePops();
+  else showPop(el, anchor);
+}
+
+// Buttons that own a popover light up while it is up, so a toggle looks like
+// one rather than like something that failed to close.
+function syncPopAnchors(): void {
+  colorChip.classList.toggle('on', popOpen(colorPop));
+  sizeChip.classList.toggle('on', popOpen(sizePop));
+  recentBtn.classList.toggle('on', popOpen(recentPop));
+  dockMoreBtn.classList.toggle('active', popOpen(dockOverflow));
+}
+
+scrim.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  closePops();
+});
+
+// ---- the dock -------------------------------------------------------------
+
+const dockEl = $('dock');
+const dockMain = $('dock-main');
+const dockMoreBtn = $('dock-more');
+const dockGrip = $('dock-grip');
+const dockOverflow = $('dock-overflow');
+let dock: Dock | null = null;
+
+// On macOS the bar sits right at the top edge, and only steps down when it is
+// actually wide enough to run into the traffic lights — which, since it is
+// centred and sheds sections as it narrows, is a question about this window at
+// this moment rather than about the platform.
+const LIGHTS = 96; // px of window corner the traffic lights own
+
+function placeDock(): void {
+  if (dockSide !== 'top' || !document.body.classList.contains('mac')) {
+    dockEl.style.removeProperty('--dock-top');
+    return;
+  }
+  dockEl.style.setProperty('--dock-top', '10px');
+  if (dockEl.getBoundingClientRect().left < LIGHTS) {
+    dockEl.style.setProperty('--dock-top', 'calc(var(--safe-top) + 4px)');
+  }
+}
+
+function applyDockPads(): void {
+  if (!dock) return;
+  placeDock();
+  const pads = dock.pads();
+  const style = document.body.style;
+  style.setProperty('--pad-top', `${pads.top}px`);
+  style.setProperty('--pad-right', `${pads.right}px`);
+  style.setProperty('--pad-bottom', `${pads.bottom}px`);
+  style.setProperty('--pad-left', `${pads.left}px`);
+  stackRightPanels();
+}
+
+// Layers and the stickers tray share the right-hand rail. Where the first one
+// ends depends on how many layers there are, so the second is hung off its
+// real bottom edge rather than guessed at from the window — on a short window
+// a guess is the difference between a tidy column and two panels on top of
+// each other.
+function stackRightPanels(): void {
+  stickersPanel.style.top = '';
+  stickersPanel.style.bottom = '';
+  stickersPanel.style.maxHeight = '';
+  if (!stickersOpen || !layersOpen) return;
+  const gap = 10;
+  const below = layersPanel.getBoundingClientRect().bottom + gap;
+  // Zoom pill, its margin, and a gap — the tray stops above all three.
+  const floor = (dock?.pads().bottom ?? 0) + (timelineOpen ? TIMELINE_H : 0) + 56;
+  stickersPanel.style.top = `${below}px`;
+  stickersPanel.style.bottom = 'auto';
+  // A floor, because a tray too short to show a sticker is worse than one that
+  // has to scroll — and on a window that small, something has to give.
+  stickersPanel.style.maxHeight = `${Math.max(96, window.innerHeight - below - floor)}px`;
+}
+
+// The live tool's options ride alongside the dock rather than inside it: they
+// stay in view on every edge without having to fold into a column.
+function placeToolSettings(): void {
+  if (toolSettings.classList.contains('hidden')) return;
+  const r = dockEl.getBoundingClientRect();
+  const p = toolSettings.getBoundingClientRect();
+  const gap = 8;
+  let left: number;
+  let top: number;
+  // On the sides it rides at the dock's middle rather than its top: the top
+  // corners are where the layers and stickers panels live.
+  if (dockSide === 'left') {
+    left = r.right + gap;
+    top = r.top + r.height / 2 - p.height / 2;
+  } else if (dockSide === 'right') {
+    left = r.left - p.width - gap;
+    top = r.top + r.height / 2 - p.height / 2;
+  } else if (dockSide === 'bottom') {
+    left = r.left + r.width / 2 - p.width / 2;
+    top = r.top - p.height - gap;
+  } else {
+    left = r.left + r.width / 2 - p.width / 2;
+    top = r.bottom + gap;
+  }
+  toolSettings.style.left = `${clamp(left, 8, Math.max(8, window.innerWidth - p.width - 8))}px`;
+  toolSettings.style.top = `${clamp(top, 8, Math.max(8, window.innerHeight - p.height - 8))}px`;
+}
+
+function setupDock(): void {
+  dockEl.dataset.side = dockSide;
+  dock = createDock({
+    dock: dockEl,
+    main: dockMain,
+    more: dockMoreBtn,
+    grip: dockGrip,
+    overflow: dockOverflow,
+    // Board toggles and history live in the menus too, so they are the first
+    // things to fold away; the colour and size chips outlast them, because
+    // nothing else in the app puts them a single click from the drawing. The
+    // brushes and the tools are last and only go on a genuinely tiny window —
+    // but they do go, because a bar with its end cut off is worse than a bar
+    // that admits it needs a menu.
+    shedOrder: ['view', 'history', 'color', 'size', 'tools', 'brushes'],
+    onSide: (side) => {
+      dockSide = side;
+      savePrefs();
+      requestRender();
+    },
+    onLayout: () => {
+      applyDockPads();
+      placeToolSettings();
+    },
+    closeOverflow: () => closePops(),
+    travelling: () => (toolSettings.classList.contains('hidden') ? [] : [toolSettings]),
+  });
+  dock.relayout();
+  dockMoreBtn.addEventListener('click', () => togglePop(dockOverflow, dockMoreBtn));
+  window.addEventListener('resize', () => {
+    applyDockPads();
+    placeToolSettings();
+    placeOpenPops();
+  });
+}
+
+function setDockSide(side: DockSide): void {
+  dock?.setSide(side);
+}
+
+// ---- colour picker --------------------------------------------------------
+
+// The square is driven by HSV and the board by hex, and the square has to stay
+// the authority while it is being used: black and grey have no hue to convert
+// back out of, so a round trip through hex would drop the marker to red every
+// time someone dragged into a corner.
+let hsv: HSV = { h: 0, s: 0, v: 1 };
+let hsvOwned = false;
+
+const SV_W = 252;
+const SV_H = 150;
+
+function drawSV(): void {
+  const c = sizeCanvas(svCanvas, SV_W, SV_H);
+  c.fillStyle = rgbToHex(hsvToRgb({ h: hsv.h, s: 1, v: 1 }));
+  c.fillRect(0, 0, SV_W, SV_H);
+  const white = c.createLinearGradient(0, 0, SV_W, 0);
+  white.addColorStop(0, 'rgba(255,255,255,1)');
+  white.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = white;
+  c.fillRect(0, 0, SV_W, SV_H);
+  const black = c.createLinearGradient(0, 0, 0, SV_H);
+  black.addColorStop(0, 'rgba(0,0,0,0)');
+  black.addColorStop(1, 'rgba(0,0,0,1)');
+  c.fillStyle = black;
+  c.fillRect(0, 0, SV_W, SV_H);
+
+  const x = clamp(hsv.s * SV_W, 0, SV_W);
+  const y = clamp((1 - hsv.v) * SV_H, 0, SV_H);
+  c.beginPath();
+  c.arc(x, y, 6.5, 0, Math.PI * 2);
+  c.strokeStyle = '#fff';
+  c.lineWidth = 2;
+  c.stroke();
+  c.beginPath();
+  c.arc(x, y, 8, 0, Math.PI * 2);
+  c.strokeStyle = 'rgba(0,0,0,0.55)';
+  c.lineWidth = 1.2;
+  c.stroke();
+}
+
+function commitPickerHsv(remember: boolean): void {
+  hsvOwned = true;
+  setColor(rgbToHex(hsvToRgb(hsv)), remember);
+  hsvOwned = false;
+}
+
+function syncPickerFields(): void {
+  if (!hsvOwned) {
+    const from = hexToRgb(color);
+    if (from) hsv = rgbToHsv(from);
+  }
+  const rgb = hexToRgb(color) ?? { r: 0, g: 0, b: 0 };
+  hueInput.value = String(Math.round(hsv.h));
+  syncSlider(hueInput);
+  cpPreview.style.background = color;
+  if (document.activeElement !== cpHex) cpHex.value = color.replace('#', '').toUpperCase();
+  if (document.activeElement !== cpR) cpR.value = String(Math.round(rgb.r));
+  if (document.activeElement !== cpG) cpG.value = String(Math.round(rgb.g));
+  if (document.activeElement !== cpB) cpB.value = String(Math.round(rgb.b));
+  drawSV();
+  markRecent();
+}
+
+function svPick(e: PointerEvent): void {
+  const r = svCanvas.getBoundingClientRect();
+  hsv = {
+    h: hsv.h,
+    s: clamp((e.clientX - r.left) / r.width, 0, 1),
+    v: clamp(1 - (e.clientY - r.top) / r.height, 0, 1),
+  };
+  commitPickerHsv(false);
+}
+
+function wirePicker(): void {
+  let svDrag = false;
+  svCanvas.addEventListener('pointerdown', (e) => {
+    svDrag = true;
+    svCanvas.setPointerCapture(e.pointerId);
+    svPick(e);
+  });
+  svCanvas.addEventListener('pointermove', (e) => {
+    if (svDrag) svPick(e);
+  });
+  const release = (): void => {
+    if (!svDrag) return;
+    svDrag = false;
+    commitPickerHsv(true); // only the finished colour earns a place in Recent
+  };
+  svCanvas.addEventListener('pointerup', release);
+  svCanvas.addEventListener('pointercancel', release);
+
+  hueInput.addEventListener('input', () => {
+    hsv = { ...hsv, h: Number(hueInput.value) };
+    commitPickerHsv(false);
+  });
+  hueInput.addEventListener('change', () => commitPickerHsv(true));
+
+  cpHex.addEventListener('input', () => {
+    const parsed = parseColor(cpHex.value);
+    if (parsed) setColor(parsed);
+  });
+  cpHex.addEventListener('change', () => {
+    const parsed = parseColor(cpHex.value);
+    if (parsed) setColor(parsed, true);
+    else syncPickerFields(); // put back what is really set rather than leave a typo
+  });
+  for (const field of [cpR, cpG, cpB]) {
+    field.addEventListener('input', () => {
+      const rgb = {
+        r: Number(cpR.value),
+        g: Number(cpG.value),
+        b: Number(cpB.value),
+      };
+      if (![rgb.r, rgb.g, rgb.b].every((v) => Number.isFinite(v))) return;
+      setColor(rgbToHex(rgb));
+    });
+    field.addEventListener('change', () => setColor(color, true));
+  }
+  // Typing in the picker must not reach the board's own shortcuts.
+  for (const field of [cpHex, cpR, cpG, cpB]) {
+    field.addEventListener('keydown', (e) => e.stopPropagation());
+  }
+
+  colorChip.addEventListener('click', () => togglePop(colorPop, colorChip));
+  recentBtn.addEventListener('click', () => togglePop(recentPop, recentBtn));
+  cpPick.addEventListener('click', () => {
+    closePops();
+    startPicking();
+  });
+  $('cp-recent-clear').addEventListener('click', () => {
+    recent = [];
+    renderRecents();
+    savePrefs();
+  });
+}
+
+// ---- recent colours -------------------------------------------------------
+
+function renderRecents(): void {
+  for (const host of [cpRecent, recentGrid]) {
+    host.textContent = '';
+    for (const c of recent) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.style.background = c;
+      button.dataset.color = c;
+      button.title = c.toUpperCase();
+      button.addEventListener('click', () => {
+        setColor(c, true);
+        if (tool !== 'pen' && tool !== 'fill') setTool('pen');
+      });
+      host.appendChild(button);
+    }
+  }
+  $('recent-empty').classList.toggle('hidden', recent.length > 0);
+  markRecent();
+}
+
+function markRecent(): void {
+  for (const host of [cpRecent, recentGrid]) {
+    for (const el of host.children) {
+      el.classList.toggle('active', (el as HTMLElement).dataset.color?.toLowerCase() === color.toLowerCase());
+    }
+  }
+}
+
+// ---- size popover and scratch pad -----------------------------------------
+
+const PAD_W = 244;
+const PAD_H = 118;
+let padStrokes: Stroke[] = [];
+let padLive: Stroke | null = null;
+
+function paintPad(): void {
+  const c = sizeCanvas(sizePad, PAD_W, PAD_H);
+  c.fillStyle = THEMES[themeName].bg;
+  c.fillRect(0, 0, PAD_W, PAD_H);
+  for (const s of [...padStrokes, ...(padLive ? [padLive] : [])]) {
+    if (!s.path) continue;
+    c.fillStyle = s.color;
+    c.globalAlpha = BRUSHES[s.brush].alpha;
+    c.fill(s.path);
+    c.globalAlpha = 1;
+  }
+}
+
+// A miniature board, drawn with the live brush at its real size. It is the
+// only honest answer to "how big is 12?", which no number and no dot can give.
+function wireSizePad(): void {
+  const padStroke = (e: PointerEvent): Stroke => ({
+    id: uid(),
+    seq: 0,
+    color,
+    size: size * BRUSHES[brush].sizeScale,
+    pen: e.pointerType === 'pen',
+    brush,
+    seed: (Math.random() * 0xffffffff) >>> 0,
+    layer: '',
+    frame: '',
+    points: [{ x: e.offsetX, y: e.offsetY, p: pressureOf(e) }],
+    bbox: emptyBBox(),
+  });
+
+  sizePad.addEventListener('pointerdown', (e) => {
+    padLive = padStroke(e);
+    padLive.path = buildPath(padLive, true);
+    sizePad.setPointerCapture(e.pointerId);
+    paintPad();
+  });
+  sizePad.addEventListener('pointermove', (e) => {
+    if (!padLive) return;
+    for (const ev of e.getCoalescedEvents?.() ?? [e]) {
+      padLive.points.push({ x: ev.offsetX, y: ev.offsetY, p: pressureOf(ev) });
+    }
+    padLive.path = buildPath(padLive, true);
+    paintPad();
+  });
+  const finish = (): void => {
+    if (!padLive) return;
+    padLive.path = buildPath(padLive, false);
+    padStrokes.push(padLive);
+    if (padStrokes.length > 40) padStrokes.shift();
+    padLive = null;
+    paintPad();
+  };
+  sizePad.addEventListener('pointerup', finish);
+  sizePad.addEventListener('pointercancel', finish);
+
+  $('size-pad-clear').addEventListener('click', () => {
+    padStrokes = [];
+    padLive = null;
+    paintPad();
+  });
+
+  sizeChip.addEventListener('click', () => {
+    togglePop(sizePop, sizeChip);
+    if (popOpen(sizePop)) paintPad();
+  });
+  sizeNumber.addEventListener('input', () => {
+    const v = Math.round(Number(sizeNumber.value));
+    if (!Number.isFinite(v)) return;
+    setSize(clamp(v, 1, 28));
+  });
+  sizeNumber.addEventListener('keydown', (e) => e.stopPropagation());
+}
+
+// ---- colour picker tool: loupe and pick ------------------------------------
+
+const LOUPE_SIZE = 120; // css px of the magnifier
+const LOUPE_SPAN = 15; // css px of board shown across it — odd, so a pixel is dead centre
+
+function pickerActive(): boolean {
+  return tool === 'picker' || pickerHeld;
+}
+
+function startPicking(): void {
+  if (tool === 'picker') return;
+  pickedFrom = tool;
+  setTool('picker');
+}
+
+function syncPicker(): void {
+  const on = pickerActive();
+  cpPick.classList.toggle('on', on);
+  toolButtons.picker.classList.toggle('active', on);
+  if (!on) {
+    loupeEl.classList.add('hidden');
+    return;
+  }
+  if (lastPointer) drawLoupe(lastPointer.x, lastPointer.y);
+}
+
+// Magnifies straight off the board canvas rather than re-rendering: what is on
+// screen is exactly what a pick should return, grid dots and all. The colour is
+// then read back out of the loupe, which is an ordinary canvas — the board's
+// own is low-latency and not always safe to read from.
+function drawLoupe(x: number, y: number): string | null {
+  const dpr = window.devicePixelRatio || 1;
+  const c = sizeCanvas(loupeCanvas, LOUPE_SIZE, LOUPE_SIZE);
+  c.imageSmoothingEnabled = false;
+  c.fillStyle = THEMES[themeName].bg;
+  c.fillRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
+  c.drawImage(
+    canvas,
+    (x - LOUPE_SPAN / 2) * dpr,
+    (y - LOUPE_SPAN / 2) * dpr,
+    LOUPE_SPAN * dpr,
+    LOUPE_SPAN * dpr,
+    0,
+    0,
+    LOUPE_SIZE,
+    LOUPE_SIZE
+  );
+
+  const mid = Math.round((LOUPE_SIZE / 2) * dpr);
+  const px = c.getImageData(mid, mid, 1, 1).data;
+  const hex = rgbToHex({ r: px[0], g: px[1], b: px[2] });
+
+  // Grid and crosshair go on after the read, so they can never be the thing
+  // that gets picked.
+  const cell = LOUPE_SIZE / LOUPE_SPAN;
+  c.strokeStyle = 'rgba(128,128,128,0.28)';
+  c.lineWidth = 0.5;
+  c.beginPath();
+  for (let i = 1; i < LOUPE_SPAN; i++) {
+    c.moveTo(i * cell, 0);
+    c.lineTo(i * cell, LOUPE_SIZE);
+    c.moveTo(0, i * cell);
+    c.lineTo(LOUPE_SIZE, i * cell);
+  }
+  c.stroke();
+  const half = Math.floor(LOUPE_SPAN / 2);
+  c.lineWidth = 1.5;
+  c.strokeStyle = '#000';
+  c.strokeRect(half * cell - 0.5, half * cell - 0.5, cell + 1, cell + 1);
+  c.strokeStyle = '#fff';
+  c.lineWidth = 1;
+  c.strokeRect(half * cell, half * cell, cell, cell);
+
+  loupeSwatch.style.background = hex;
+  loupeHex.textContent = hex.toUpperCase();
+  loupeEl.classList.remove('hidden');
+
+  // Follows the pointer, and hops to the other side rather than run off screen.
+  const rect = canvas.getBoundingClientRect();
+  const box = loupeEl.getBoundingClientRect();
+  let left = rect.left + x + 20;
+  let top = rect.top + y + 20;
+  if (left + box.width > window.innerWidth - 8) left = rect.left + x - box.width - 20;
+  if (top + box.height > window.innerHeight - 8) top = rect.top + y - box.height - 20;
+  loupeEl.style.left = `${Math.max(8, left)}px`;
+  loupeEl.style.top = `${Math.max(8, top)}px`;
+  return hex;
+}
+
+function takeColorAt(x: number, y: number): void {
+  const hex = drawLoupe(x, y);
+  pickerHeld = false;
+  if (!hex) {
+    syncPicker();
+    return;
+  }
+  setColor(hex, true);
+  toast(`Picked ${hex.toUpperCase()}`);
+  const back = pickedFrom;
+  pickedFrom = null;
+  if (tool === 'picker') setTool(back && back !== 'picker' ? back : 'pen');
+  else {
+    syncPicker();
+    updateCursor();
+  }
+}
+
+// ---- paint bucket ---------------------------------------------------------
+
+// The working buffer is capped: the fill it produces is a picture stored in the
+// board file, and a screenful at retina resolution is already generous.
+const FILL_MAX_DIM = 3072;
+
+function viewportBBox(): BBox {
+  const b = emptyBBox();
+  for (const [sx, sy] of [
+    [0, 0],
+    [cssWidth, 0],
+    [0, cssHeight],
+    [cssWidth, cssHeight],
+  ]) {
+    const w = toWorld(camera, sx, sy);
+    growBBox(b, w.x, w.y, 0);
+  }
+  return b;
+}
+
+// Flood fill on a freshly rendered copy of the view — no grid, no marquee, no
+// eraser ring, so only the drawing bounds the paint. The buffer is axis-aligned
+// in world space rather than screen space, which is what lets the result be
+// stored as an ordinary picture even when the board is turned.
+function fillAt(e: PointerEvent): void {
+  if (!canEditActive()) return;
+  const view = viewportBBox();
+  const layout = exportLayout(view, {
+    pad: 0,
+    maxDim: FILL_MAX_DIM,
+    maxScale: camera.scale * Math.min(2, window.devicePixelRatio || 1),
+  });
+  const buffer = document.createElement('canvas');
+  buffer.width = layout.width;
+  buffer.height = layout.height;
+  paintExport(buffer, board.visibleStrokes(), board.visibleImages(), board.layers, THEMES[themeName], layout);
+
+  const bctx = buffer.getContext('2d', { willReadFrequently: true })!;
+  const pixels = bctx.getImageData(0, 0, buffer.width, buffer.height);
+  const k = layout.transform[0];
+  const tx = layout.transform[4];
+  const ty = layout.transform[5];
+  const world = toWorld(camera, e.offsetX, e.offsetY);
+  const px = Math.round(world.x * k + tx);
+  const py = Math.round(world.y * k + ty);
+  if (px < 0 || py < 0 || px >= buffer.width || py >= buffer.height) return;
+
+  let mask =
+    fillMode === 'similar'
+      ? similarSelect(pixels.data, buffer.width, buffer.height, px, py, fillTolerance)
+      : floodSelect(pixels.data, buffer.width, buffer.height, px, py, fillTolerance);
+  // One ring of growth pushes the paint under the anti-aliased edge of whatever
+  // bounded it, so no pale seam is left between the fill and the line. More than
+  // one starts eating the line itself: a buffer pixel is worth several world
+  // units when the board is zoomed out, and thin ink disappears into it.
+  mask = dilate(mask, buffer.width, buffer.height);
+  const bounds = maskBounds(mask, buffer.width, buffer.height);
+  if (!bounds) return;
+  const open = maskTouchesBorder(mask, buffer.width, buffer.height);
+
+  const w = bounds.maxX - bounds.minX + 1;
+  const h = bounds.maxY - bounds.minY + 1;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const octx = out.getContext('2d')!;
+  const shape = octx.createImageData(w, h);
+  const rgb = hexToRgb(color) ?? { r: 255, g: 255, b: 255 };
+  for (let y = 0; y < h; y++) {
+    const row = (y + bounds.minY) * buffer.width + bounds.minX;
+    for (let x = 0; x < w; x++) {
+      if (!mask[row + x]) continue;
+      const i = (y * w + x) * 4;
+      shape.data[i] = rgb.r;
+      shape.data[i + 1] = rgb.g;
+      shape.data[i + 2] = rgb.b;
+      shape.data[i + 3] = 255;
+    }
+  }
+  octx.putImageData(shape, 0, 0);
+
+  board.addImage({
+    id: uid(),
+    seq: board.takeSeq(),
+    src: out.toDataURL('image/png'),
+    x: (bounds.minX - tx) / k,
+    y: (bounds.minY - ty) / k,
+    width: w / k,
+    height: h / k,
+    layer: board.activeLayer,
+    frame: board.activeFrame,
+  });
+  if (open && fillMode === 'region') {
+    toast('That outline is not closed — filled as far as the view goes.');
+  }
+}
+
+// ---- copy, paste, duplicate, stickers --------------------------------------
+
+function selectedStrokes(): Stroke[] {
+  const sel = selection;
+  return sel ? board.strokes.filter((s) => sel.ids.has(s.id)) : [];
+}
+
+function selectedImages(): BoardImage[] {
+  const sel = selection;
+  return sel ? board.images.filter((im) => sel.images.has(im.id)) : [];
+}
+
+// Where a clip lands when nothing said otherwise: centred on the pointer if it
+// is over the board, otherwise in the middle of the view.
+function dropPoint(clip: Clip): Point {
+  const at = lastPointer ?? { x: cssWidth / 2, y: cssHeight / 2 };
+  const centre = toWorld(camera, at.x, at.y);
+  return { x: centre.x - clip.width / 2, y: centre.y - clip.height / 2 };
+}
+
+function pasteClip(clip: Clip, at?: Point): void {
+  if (!canEditActive()) return;
+  const { strokes, images } = placeClip(clip, at ?? dropPoint(clip), {
+    layer: board.activeLayer,
+    frame: board.activeFrame,
+    takeSeq: () => board.takeSeq(),
+  });
+  for (const s of strokes) s.path = buildPath(s);
+  board.addItems(strokes, images);
+  selectPlaced(strokes, images);
+}
+
+// Whatever just arrived comes in selected, so it can be dragged into place
+// without hunting for it first.
+function selectPlaced(strokes: Stroke[], images: BoardImage[]): void {
+  const box = board.contentBBox(strokes, images);
+  if (!box) return;
+  setTool('select');
+  selection = {
+    ids: new Set(strokes.map((s) => s.id)),
+    images: new Set(images.map((im) => im.id)),
+    poly: rectPoly(box),
+  };
+  moveX = 0;
+  moveY = 0;
+  syncAnts();
+  requestRender();
+}
+
+async function copySelection(cut: boolean): Promise<void> {
+  const strokes = selectedStrokes();
+  const images = selectedImages();
+  const clip = makeClip(strokes, images);
+  const box = board.contentBBox(strokes, images);
+  if (!clip || !box) {
+    toast('Nothing selected — lasso something with the select tool (S).');
+    return;
+  }
+  clipboard = clip;
+  // A picture of the selection goes to the system clipboard as well, so it can
+  // be pasted into anything else. Alongside it goes a one-line marker: paste
+  // reads that back to tell "still our copy" from "someone copied something
+  // else since", which no amount of comparing re-encoded pictures can do
+  // reliably. It is written as text so it survives the round trip, and reads
+  // as a sentence in whatever plain-text field it lands in.
+  const marker = `BetterBoard clip · ${strokes.length + images.length} items · ${uid()}`;
+  const png = renderExport(strokes, images, board.layers, box, THEMES[themeName], {
+    pad: 8,
+    maxScale: 2,
+  }).toDataURL('image/png');
+  // The cut happens here, before the clipboard write is awaited: what gets
+  // deleted has to be what was copied, and the selection is free to change
+  // while an IPC round trip is in the air.
+  if (cut) {
+    board.removeItems(new Set(strokes.map((s) => s.id)), new Set(images.map((im) => im.id)));
+    clearSelection();
+  }
+  toast(cut ? 'Cut' : 'Copied');
+  clipMark = marker;
+  if (!(await window.betterboard.clipboardWriteImage(png, marker))) clipMark = null;
+}
+
+// A text field gets served by hand rather than through document.execCommand:
+// the accelerator is consumed by the menu, so by the time the renderer hears
+// about it there is no user gesture left and Chromium's own copy quietly does
+// nothing at all.
+function copyAction(cut: boolean): void {
+  const focused = document.activeElement;
+  if (isTextField(focused)) {
+    const start = focused.selectionStart ?? 0;
+    const end = focused.selectionEnd ?? 0;
+    if (start === end) return;
+    void window.betterboard.clipboardWriteText(focused.value.slice(start, end));
+    if (cut) {
+      focused.value = focused.value.slice(0, start) + focused.value.slice(end);
+      focused.selectionStart = focused.selectionEnd = start;
+      focused.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return;
+  }
+  void copySelection(cut);
+}
+
+function duplicateSelection(): boolean {
+  const strokes = selectedStrokes();
+  const images = selectedImages();
+  const clip = makeClip(strokes, images);
+  const box = board.contentBBox(strokes, images);
+  if (!clip || !box) return false;
+  const offset = toWorldDelta(camera, NUDGE, NUDGE);
+  pasteClip(clip, { x: box.minX + offset.x, y: box.minY + offset.y });
+  return true;
+}
+
+// One key for "make another one of this". What "this" is depends on what is in
+// front of you: a selection if there is one, otherwise the frame — but only
+// when the timeline is already open, because a duplicate should never be the
+// reason a panel appears.
+function duplicateAction(): void {
+  if (duplicateSelection()) return;
+  if (!timelineOpen) {
+    toast('Nothing selected. Lasso something first, or open the timeline (T) to duplicate frames.');
+    return;
+  }
+  stopPlayback();
+  clearSelection();
+  board.addFrame(true);
+  scrollFrameIntoView();
+}
+
+function selectAll(): void {
+  const focused = document.activeElement;
+  if (isTextField(focused)) {
+    focused.select();
+    return;
+  }
+  const strokes = board.strokes.filter(editable);
+  const images = board.images.filter(
+    (im) => im.frame === board.activeFrame && im.layer === board.activeLayer
+  );
+  const box = board.contentBBox(strokes, images);
+  if (!box) return;
+  setTool('select');
+  const pad = 6 / camera.scale;
+  selection = {
+    ids: new Set(strokes.map((s) => s.id)),
+    images: new Set(images.map((im) => im.id)),
+    poly: rectPoly({
+      minX: box.minX - pad,
+      minY: box.minY - pad,
+      maxX: box.maxX + pad,
+      maxY: box.maxY + pad,
+    }),
+  };
+  moveX = 0;
+  moveY = 0;
+  syncAnts();
+  requestRender();
+}
+
+// The bar only says what is possible right now, and only when it is.
+let selectionKey = '';
+function syncSelectionBar(): void {
+  const sel = selection;
+  const key = sel ? `${sel.ids.size}:${sel.images.size}` : '';
+  if (key === selectionKey) return;
+  selectionKey = key;
+  selActions.classList.toggle('hidden', !sel || drag?.kind === 'lasso');
+  if (!sel) return;
+  const parts: string[] = [];
+  if (sel.ids.size) parts.push(`${sel.ids.size} stroke${sel.ids.size === 1 ? '' : 's'}`);
+  if (sel.images.size) parts.push(`${sel.images.size} picture${sel.images.size === 1 ? '' : 's'}`);
+  selHint.textContent = parts.join(' · ') || 'Selection';
+}
+
+// ---- stickers -------------------------------------------------------------
+
+const STICKER_DRAG_TYPE = 'application/x-betterboard-sticker';
+
+function setStickersOpen(open: boolean): void {
+  stickersOpen = open;
+  stickersPanel.classList.toggle('hidden', !open);
+  stickersBtn.classList.toggle('active', open);
+  stackRightPanels();
+  savePrefs();
+}
+
+async function loadStickers(): Promise<void> {
+  try {
+    const raw = await window.betterboard.loadStickers();
+    stickers = (Array.isArray(raw) ? raw : []).filter(isSticker);
+  } catch {
+    stickers = [];
+  }
+  renderStickers();
+}
+
+function persistStickers(): void {
+  void window.betterboard.saveStickers(stickers);
+}
+
+// A sticker keeps the strokes, not a picture of them: stamped back down it is
+// live ink again, at whatever colour and pressure it was drawn with, so it can
+// be erased, moved and drawn over like anything else on the board.
+function saveSelectionAsSticker(): void {
+  const strokes = selectedStrokes();
+  const images = selectedImages();
+  const clip = makeClip(strokes, images);
+  const box = board.contentBBox(strokes, images);
+  if (!clip || !box) {
+    toast('Select something first — lasso it with the select tool (S).');
+    return;
+  }
+  const thumb = renderExport(strokes, images, board.layers, box, THEMES[themeName], {
+    pad: 6,
+    maxDim: 240,
+    maxScale: 1.5,
+    background: null, // a sticker has to sit on whichever board colour is up
+  }).toDataURL('image/png');
+  stickers.unshift({ id: uid(), name: stickerName(stickers), thumb, clip, createdAt: Date.now() });
+  if (stickers.length > MAX_STICKERS) stickers.length = MAX_STICKERS;
+  persistStickers();
+  renderStickers();
+  setStickersOpen(true);
+  toast('Kept as a sticker');
+}
+
+let renamingSticker: string | null = null;
+
+function renderStickers(): void {
+  if (renamingSticker) return;
+  stickerList.textContent = '';
+  stickersEmpty.classList.toggle('hidden', stickers.length > 0);
+  for (const sticker of stickers) {
+    const cell = document.createElement('div');
+    cell.className = 'sticker';
+    cell.title = `${sticker.name} — click to stamp, or drag it onto the board`;
+    cell.draggable = true;
+
+    const img = document.createElement('img');
+    img.src = sticker.thumb;
+    img.alt = sticker.name;
+
+    const name = document.createElement('span');
+    name.className = 'sticker-name';
+    name.textContent = sticker.name;
+
+    const del = document.createElement('button');
+    del.className = 'sticker-del';
+    del.title = 'Forget this sticker';
+    del.innerHTML =
+      '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      stickers = stickers.filter((s) => s.id !== sticker.id);
+      persistStickers();
+      renderStickers();
+    });
+
+    cell.addEventListener('click', () => {
+      const centre = toWorld(camera, cssWidth / 2, cssHeight / 2);
+      pasteClip(sticker.clip, {
+        x: centre.x - sticker.clip.width / 2,
+        y: centre.y - sticker.clip.height / 2,
+      });
+    });
+    cell.addEventListener('dragstart', (e) => {
+      e.dataTransfer?.setData(STICKER_DRAG_TYPE, sticker.id);
+      e.dataTransfer?.setDragImage(img, img.width / 2, img.height / 2);
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
+    });
+    name.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      renameSticker(cell, name, sticker);
+    });
+
+    cell.append(img, name, del);
+    stickerList.appendChild(cell);
+  }
+}
+
+function renameSticker(cell: HTMLElement, label: HTMLElement, sticker: Sticker): void {
+  const input = document.createElement('input');
+  input.className = 'sticker-name';
+  input.value = sticker.name;
+  renamingSticker = sticker.id;
+  cell.replaceChild(input, label);
+  input.focus();
+  input.select();
+  const commit = (save: boolean): void => {
+    if (renamingSticker !== sticker.id) return;
+    renamingSticker = null;
+    if (save) {
+      sticker.name = input.value.trim().slice(0, 40) || sticker.name;
+      persistStickers();
+    }
+    renderStickers();
+  };
+  input.addEventListener('blur', () => commit(true));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') commit(true);
+    else if (e.key === 'Escape') commit(false);
+    e.stopPropagation();
+  });
+}
+
 // ---- init -------------------------------------------------------------------
 
 async function main(): Promise<void> {
   document.body.classList.toggle('mac', window.betterboard.platform === 'darwin');
   loadPrefs();
   applyTheme();
+  setupDock();
+  wireSliders();
+  wirePicker();
+  wireSizePad();
   setEraserMode(eraserMode);
   setWandMode(wandMode);
+  setFillMode(fillMode);
   wandToleranceInput.value = String(wandTolerance);
   $('wand-tolerance-val').textContent = String(wandTolerance);
+  fillToleranceInput.value = String(fillTolerance);
+  $('fill-tolerance-val').textContent = String(fillTolerance);
   setTool(tool);
   syncBrushButtons();
+  renderRecents();
   setColor(color);
   sizeInput.value = String(size);
   setSize(size);
+  paintPad();
+  setStickersOpen(stickersOpen);
+  void loadStickers();
   gridBtn.classList.toggle('active', grid);
 
+  // Decoding is asynchronous and is not an edit, so it gets its own hook: a
+  // pasted picture or a fresh bucket fill has nothing to show until its bitmap
+  // lands, and without this it waits for whatever happens to redraw next.
+  board.onRedraw = requestRender;
   board.onChange = () => {
     refreshGhosts();
     requestRender();
@@ -2894,6 +4347,7 @@ async function main(): Promise<void> {
   setLayersOpen(layersOpen);
   setTimelineOpen(timelineOpen);
   syncOnionPanel();
+  applyDockPads();
 
   window.addEventListener('resize', resizeCanvas);
   resizeCanvas();

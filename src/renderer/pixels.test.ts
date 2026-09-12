@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { backgroundSelect, dilate, floodSelect, maskBounds } from './pixels';
+import { backgroundSelect, dilate, floodSelect, maskBounds, maskTouchesBorder, similarSelect } from './pixels';
 
 // Builds an RGBA buffer from a character grid and a palette, so a test image
 // reads like a picture of itself.
@@ -127,5 +127,38 @@ describe('maskBounds', () => {
 
   test('is null for an empty mask', () => {
     expect(maskBounds(new Uint8Array(6), 3, 2)).toBeNull();
+  });
+});
+
+describe('similarSelect', () => {
+  test('takes every matching pixel, connected or not', () => {
+    const { data, width, height } = raster(['rwr', 'www', 'rwr'], INK);
+    const mask = similarSelect(data, width, height, 0, 0, 10);
+    expect(picture(mask, width, height)).toEqual(['#.#', '...', '#.#']);
+  });
+
+  test('still respects tolerance', () => {
+    const { data, width, height } = raster(['rb', 'br'], INK);
+    expect(picture(similarSelect(data, width, height, 0, 0, 10), width, height)).toEqual(['#.', '.#']);
+    expect(picture(similarSelect(data, width, height, 0, 0, 255), width, height)).toEqual(['##', '##']);
+  });
+
+  test('a click outside the picture selects nothing', () => {
+    const { data, width, height } = raster(['rr', 'rr'], INK);
+    expect(similarSelect(data, width, height, 5, 0, 40).some((v) => v === 1)).toBe(false);
+  });
+});
+
+describe('maskTouchesBorder', () => {
+  test('tells an enclosed region from one that ran off the edge', () => {
+    const { data, width, height } = raster(['www', 'wrw', 'www'], INK);
+    const inside = floodSelect(data, width, height, 1, 1, 10);
+    const outside = floodSelect(data, width, height, 0, 0, 10);
+    expect(maskTouchesBorder(inside, width, height)).toBe(false);
+    expect(maskTouchesBorder(outside, width, height)).toBe(true);
+  });
+
+  test('an empty mask has not touched anything', () => {
+    expect(maskTouchesBorder(new Uint8Array(9), 3, 3)).toBe(false);
   });
 });

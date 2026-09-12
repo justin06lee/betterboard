@@ -1,21 +1,46 @@
 import type { BBox, BoardImage, Camera, Layer, Point, Stroke, Theme } from './types';
 import { BRUSHES, bboxIntersects, emptyBBox, growBBox, imageBBox, toScreen, toWorld } from './types';
 
-type Matrix = [number, number, number, number, number, number];
+export type Matrix = [number, number, number, number, number, number];
+
+// World -> canvas pixels for a camera, at `ratio` canvas pixels per css pixel,
+// with the css point (ox, oy) landing on the canvas origin. The same map as
+// toScreen, as one setTransform, so the board, a region crop and every overlay
+// drawn with toScreen agree whether the view is turned, mirrored or both.
+export function worldMatrix(camera: Camera, ratio: number, ox = 0, oy = 0): Matrix {
+  const k = ratio * camera.scale;
+  const m = camera.flip ? -1 : 1;
+  const cos = Math.cos(camera.rotation);
+  const sin = Math.sin(camera.rotation);
+  return [
+    k * m * cos,
+    k * m * sin,
+    -k * sin,
+    k * cos,
+    -k * (m * cos * camera.x - sin * camera.y) - ox * ratio,
+    -k * (m * sin * camera.x + cos * camera.y) - oy * ratio,
+  ];
+}
 
 // The lasso being drawn, or a committed selection being dragged. `poly` is in
-// world coordinates; `dx`/`dy` is the in-progress move offset, also in world
-// units, applied to both the outline and the strokes it holds.
+// world coordinates. The in-progress move or resize is the world -> world map
+// (x·sx + dx, y·sy + dy), applied to the outline, the grips, and whatever
+// strokes and pictures `ids` and `imageIds` list.
 export interface Marquee {
   poly: Point[];
   ids: Set<string> | null;
   imageIds?: Set<string> | null;
-  // Where the resize grips go. Given explicitly rather than derived from
-  // `poly`, which is the selection outline and may be a freehand lasso with
-  // dozens of vertices — one grip per vertex is not what anyone wants.
+  // Where the resize grips go, corners first. Given explicitly rather than
+  // derived from `poly`, which is the selection outline and may be a freehand
+  // lasso with dozens of vertices — one grip per vertex is not what anyone wants.
   grips?: Point[] | null;
+  // Draws the box through the corner grips as a hairline of its own, for an
+  // outline (a lasso) that says nothing about the box the grips work on.
+  frame?: boolean;
   dx: number;
   dy: number;
+  sx?: number;
+  sy?: number;
   dashOffset: number;
 }
 
@@ -115,9 +140,10 @@ function exportScratchContext(width: number, height: number, transform: Matrix):
 }
 
 // Paints one layer's strokes into a context already carrying the world
-// transform. Strokes being dragged are lifted into a translated pass so a move
-// costs one extra transform rather than a rebuild — but they stay inside their
-// own layer, so a moving stroke never jumps above the layers over it.
+// transform. Strokes being dragged are lifted into a transformed pass so a move
+// (or a resize with too much ink to rebuild at pointer speed) costs one extra
+// transform rather than a rebuild — but they stay inside their own layer, so a
+// moving stroke never jumps above the layers over it.
 function paintLayer(
   ctx: CanvasRenderingContext2D,
   bucket: Bucket,
@@ -146,14 +172,15 @@ function paintLayer(
     }
   }
   if (m && (moving || movingImages)) {
+    const sx = m.sx ?? 1;
+    const sy = m.sy ?? 1;
     ctx.save();
-    ctx.translate(m.dx, m.dy);
+    ctx.transform(sx, 0, 0, sy, m.dx, m.dy);
     for (const s of list) {
       if (!s.path || !moving?.has(s.id)) continue;
       const b = s.bbox;
-      if (!bboxIntersects({ minX: b.minX + m.dx, minY: b.minY + m.dy, maxX: b.maxX + m.dx, maxY: b.maxY + m.dy }, view)) {
-        continue;
-      }
+      const moved = { minX: b.minX * sx + m.dx, minY: b.minY * sy + m.dy, maxX: b.maxX * sx + m.dx, maxY: b.maxY * sy + m.dy };
+      if (!bboxIntersects(moved, view)) continue;
       fillStroke(ctx, s);
     }
     for (const im of pics) {
@@ -213,9 +240,12 @@ function drawMarquee(
   theme: Theme
 ): void {
   if (m.poly.length < 2) return;
+  const sx = m.sx ?? 1;
+  const sy = m.sy ?? 1;
+  const at = (p: Point) => toScreen(camera, p.x * sx + m.dx, p.y * sy + m.dy);
   ctx.beginPath();
   for (let i = 0; i < m.poly.length; i++) {
-    const p = toScreen(camera, m.poly[i].x + m.dx, m.poly[i].y + m.dy);
+    const p = at(m.poly[i]);
     if (i === 0) ctx.moveTo(p.x, p.y);
     else ctx.lineTo(p.x, p.y);
   }
@@ -241,8 +271,21 @@ function drawMarquee(
   ctx.setLineDash([]);
 
   if (!m.grips) return;
-  for (const p of m.grips) {
-    const s = toScreen(camera, p.x + m.dx, p.y + m.dy);
+  const grips = m.grips.map(at);
+  if (m.frame && grips.length >= 4) {
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) {
+      if (i === 0) ctx.moveTo(grips[i].x, grips[i].y);
+      else ctx.lineTo(grips[i].x, grips[i].y);
+    }
+    ctx.closePath();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = theme.accent;
+    ctx.globalAlpha = 0.6;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  for (const s of grips) {
     ctx.beginPath();
     ctx.rect(s.x - HANDLE / 2, s.y - HANDLE / 2, HANDLE, HANDLE);
     ctx.fillStyle = theme.accent;
@@ -283,17 +326,7 @@ export function render(
   }
 
   // World-space pass: one transform, cached Path2D per stroke.
-  const k = dpr * camera.scale;
-  const cos = Math.cos(camera.rotation);
-  const sin = Math.sin(camera.rotation);
-  const world: Matrix = [
-    k * cos,
-    k * sin,
-    -k * sin,
-    k * cos,
-    -k * (cos * camera.x - sin * camera.y),
-    -k * (sin * camera.x + cos * camera.y),
-  ];
+  const world = worldMatrix(camera, dpr);
   ctx.setTransform(...world);
   if (opts.grid) drawGrid(ctx, camera, view, opts.theme.grid);
 
@@ -338,8 +371,9 @@ export function render(
   }
 
   const m = opts.marquee;
-  const moving = m && m.ids && (m.dx !== 0 || m.dy !== 0) ? m.ids : null;
-  const movingImages = m && m.imageIds && (m.dx !== 0 || m.dy !== 0) ? m.imageIds : null;
+  const lifted = m !== null && (m.dx !== 0 || m.dy !== 0 || (m.sx ?? 1) !== 1 || (m.sy ?? 1) !== 1);
+  const moving = lifted && m?.ids ? m.ids : null;
+  const movingImages = lifted && m?.imageIds ? m.imageIds : null;
   const buckets = bucketByLayer(strokes, opts.images, opts.layers);
   for (const layer of opts.layers) {
     if (!layer.visible || layer.opacity === 0) continue;
@@ -418,17 +452,7 @@ export function renderRegion(
 
   // Same world transform the board uses, shifted so the rectangle's top-left
   // corner becomes the image origin.
-  const k = scale * camera.scale;
-  const cos = Math.cos(camera.rotation);
-  const sin = Math.sin(camera.rotation);
-  const world: Matrix = [
-    k * cos,
-    k * sin,
-    -k * sin,
-    k * cos,
-    -k * (cos * camera.x - sin * camera.y) - rect.x * scale,
-    -k * (sin * camera.x + cos * camera.y) - rect.y * scale,
-  ];
+  const world = worldMatrix(camera, scale, rect.x, rect.y);
 
   const view = emptyBBox();
   for (const [sx, sy] of [
@@ -509,12 +533,18 @@ export function paintExport(
   images: BoardImage[],
   layers: Layer[],
   theme: Theme,
-  layout: ExportLayout
+  layout: ExportLayout,
+  // Null leaves the canvas transparent, which is what a sticker thumbnail
+  // wants: it has to sit on whichever board colour is up at the time.
+  background: string | null = theme.bg
 ): void {
   const ctx = canvas.getContext('2d')!;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = theme.bg;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (background !== null) {
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   const everything: BBox = { minX: -Infinity, minY: -Infinity, maxX: Infinity, maxY: Infinity };
   const buckets = bucketByLayer(strokes, images, layers);
@@ -543,12 +573,15 @@ export function renderExport(
   images: BoardImage[],
   layers: Layer[],
   content: BBox,
-  theme: Theme
+  theme: Theme,
+  opts: ExportLayoutOpts & { background?: string | null } = {}
 ): HTMLCanvasElement {
-  const layout = exportLayout(content);
+  const layout = exportLayout(content, opts);
   const canvas = document.createElement('canvas');
   canvas.width = layout.width;
   canvas.height = layout.height;
-  paintExport(canvas, strokes, images, layers, theme, layout);
+  // `??` would swallow an explicit null, which is the whole point of the option.
+  const background = 'background' in opts ? (opts.background as string | null) : theme.bg;
+  paintExport(canvas, strokes, images, layers, theme, layout, background);
   return canvas;
 }

@@ -114,6 +114,38 @@ describe('Board.replaceStrokes', () => {
   });
 });
 
+describe('Board.transformItems', () => {
+  test('reshapes ink and pictures in one step, keeping ids and places', () => {
+    const board = new Board();
+    const a = stroke('a', 0, board);
+    const b = stroke('b', 1, board);
+    const picture = image('picture', 2, board);
+    board.strokes.push(a, b);
+    board.images.push(picture);
+    const bigger = { ...b, size: 8, points: [{ x: 5, y: 5, p: 0.5 }] };
+
+    board.transformItems([bigger], [{ id: 'picture', to: { x: 1, y: 2, width: 30, height: 10 } }]);
+    expect(board.strokes).toEqual([a, bigger]);
+    expect(board.strokes[1]).toBe(bigger);
+    expect(picture).toMatchObject({ x: 1, y: 2, width: 30, height: 10 });
+
+    board.undo();
+    expect(board.strokes[1]).toBe(b);
+    expect(picture).toMatchObject({ x: 0, y: 0, width: 10, height: 10 });
+
+    board.redo();
+    expect(board.strokes[1]).toBe(bigger);
+    expect(picture).toMatchObject({ x: 1, y: 2, width: 30, height: 10 });
+  });
+
+  test('a reshape that changes nothing records nothing', () => {
+    const board = new Board();
+    board.images.push(image('picture', 0, board));
+    board.transformItems([], [{ id: 'picture', to: { x: 0, y: 0, width: 10, height: 10 } }]);
+    expect(board.canUndo).toBe(false);
+  });
+});
+
 describe('Board.setImageSrc', () => {
   test('swaps the bitmap as one undoable operation', () => {
     const board = new Board();
@@ -248,5 +280,47 @@ describe('Board.animationBBox', () => {
 
   test('is null for a board with nothing on it', () => {
     expect(new Board().animationBBox()).toBeNull();
+  });
+});
+
+describe('Board.addItems / removeItems', () => {
+  test('paste of mixed ink and pictures is one undo step', () => {
+    const board = new Board();
+    const ink = stroke('ink', 0, board);
+    const pic = image('pic', 1, board);
+
+    board.addItems([ink], [pic]);
+    expect(board.strokes).toHaveLength(1);
+    expect(board.images).toHaveLength(1);
+
+    board.undo();
+    expect(board.strokes).toHaveLength(0);
+    expect(board.images).toHaveLength(0);
+
+    board.redo();
+    expect(board.strokes.map((s) => s.id)).toEqual(['ink']);
+    expect(board.images.map((im) => im.id)).toEqual(['pic']);
+  });
+
+  test('deleting a mixed selection is one undo step, put back in place', () => {
+    const board = new Board();
+    board.strokes.push(stroke('keep', 0, board), stroke('cut', 1, board));
+    board.images.push(image('pic', 2, board));
+
+    board.removeItems(new Set(['cut']), new Set(['pic']));
+    expect(board.strokes.map((s) => s.id)).toEqual(['keep']);
+    expect(board.images).toHaveLength(0);
+
+    board.undo();
+    expect(board.strokes.map((s) => s.id)).toEqual(['keep', 'cut']);
+    expect(board.images.map((im) => im.id)).toEqual(['pic']);
+  });
+
+  test('nothing selected pushes nothing to undo', () => {
+    const board = new Board();
+    board.strokes.push(stroke('a', 0, board));
+    board.removeItems(new Set(['missing']), new Set());
+    board.addItems([], []);
+    expect(board.canUndo).toBe(false);
   });
 });

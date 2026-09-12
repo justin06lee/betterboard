@@ -60,6 +60,31 @@ export function floodSelect(
   return mask;
 }
 
+// Every pixel within tolerance of the seed's colour, connected or not — the
+// paint bucket's "similar" mode, and the reason recolouring every occurrence
+// of one shade does not mean clicking each of them in turn.
+export function similarSelect(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  tolerance: number
+): Uint8Array {
+  const mask = new Uint8Array(width * height);
+  if (x < 0 || y < 0 || x >= width || y >= height) return mask;
+  const i0 = (y * width + x) * 4;
+  const r = data[i0];
+  const g = data[i0 + 1];
+  const b = data[i0 + 2];
+  const a = data[i0 + 3];
+  const tolSq = budget(tolerance);
+  for (let p = 0; p < mask.length; p++) {
+    if (within(data, p * 4, r, g, b, a, tolSq)) mask[p] = 1;
+  }
+  return mask;
+}
+
 // Selects the backdrop of a picture: everything connected to the border that
 // matches the border's dominant color. A subject touching the edge survives as
 // long as its color differs; a background-colored hole *inside* the subject is
@@ -183,6 +208,20 @@ export function dilate(mask: Uint8Array, width: number, height: number): Uint8Ar
     }
   }
   return out;
+}
+
+// True if the region ran off the edge of the buffer it was flooded in. The
+// paint bucket asks this to tell a closed shape from an open one: a fill that
+// reaches the border was never enclosed, it just ran out of picture.
+export function maskTouchesBorder(mask: Uint8Array, width: number, height: number): boolean {
+  if (width === 0 || height === 0) return false;
+  for (let x = 0; x < width; x++) {
+    if (mask[x] || mask[(height - 1) * width + x]) return true;
+  }
+  for (let y = 0; y < height; y++) {
+    if (mask[y * width] || mask[y * width + width - 1]) return true;
+  }
+  return false;
 }
 
 export function maskBounds(mask: Uint8Array, width: number, height: number): MaskBounds | null {

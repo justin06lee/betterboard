@@ -5,6 +5,8 @@ import { MAX_FPS, MIN_FPS, defaultOnion, emptyBBox, growBBox, isBrush, newFrame,
 export type Op =
   | { type: 'add'; stroke: Stroke }
   | { type: 'add-many'; strokes: Stroke[] }
+  | { type: 'add-items'; strokes: Stroke[]; images: BoardImage[] }
+  | { type: 'remove-items'; strokes: { index: number; stroke: Stroke }[]; images: { index: number; image: BoardImage }[] }
   | { type: 'remove'; removed: { index: number; stroke: Stroke }[] }
   | { type: 'replace'; changes: StrokeReplacement[]; imageChanges?: ImageSrcChange[] }
   | { type: 'clear'; strokes: { index: number; stroke: Stroke }[]; images: { index: number; image: BoardImage }[] }
@@ -12,7 +14,7 @@ export type Op =
   | { type: 'move'; ids: string[]; images: string[]; dx: number; dy: number }
   | { type: 'image-add'; image: BoardImage }
   | { type: 'image-remove'; removed: { index: number; image: BoardImage }[] }
-  | { type: 'image-resize'; id: string; from: Rect; to: Rect }
+  | { type: 'transform'; changes: StrokeReplacement[]; images: { id: string; from: Rect; to: Rect }[] }
   | { type: 'image-src'; id: string; from: string; to: string }
   | { type: 'layer-add'; index: number; layer: Layer }
   | { type: 'layer-remove'; index: number; layer: Layer; removed: { index: number; stroke: Stroke }[]; removedImages: BoardImage[] }
@@ -89,6 +91,33 @@ export class Board {
     this.push({ type: 'add-many', strokes });
   }
 
+  // Ink and pictures arriving together — a paste, a duplicate, a sticker
+  // stamped down — are one thing that happened, so they undo in one step.
+  addItems(strokes: Stroke[], images: BoardImage[]): void {
+    if (strokes.length === 0 && images.length === 0) return;
+    this.strokes.push(...strokes);
+    for (const image of images) {
+      this.hydrate(image);
+      this.images.push(image);
+    }
+    this.push({ type: 'add-items', strokes, images });
+  }
+
+  // The other half of addItems: deleting a mixed selection is one step, so
+  // getting it back is one press of undo rather than one per kind.
+  removeItems(strokeIds: Set<string>, imageIds: Set<string>): void {
+    const strokes = this.strokes
+      .map((stroke, index) => ({ index, stroke }))
+      .filter(({ stroke }) => strokeIds.has(stroke.id));
+    const images = this.images
+      .map((image, index) => ({ index, image }))
+      .filter(({ image }) => imageIds.has(image.id));
+    if (strokes.length === 0 && images.length === 0) return;
+    if (strokes.length) this.strokes = this.strokes.filter((stroke) => !strokeIds.has(stroke.id));
+    if (images.length) this.images = this.images.filter((image) => !imageIds.has(image.id));
+    this.push({ type: 'remove-items', strokes, images });
+  }
+
   // ---- images -------------------------------------------------------------
 
   addImage(image: BoardImage): void {
@@ -108,13 +137,30 @@ export class Board {
     this.push({ type: 'image-remove', removed });
   }
 
-  resizeImage(id: string, to: Rect): void {
-    const image = this.images.find((im) => im.id === id);
-    if (!image) return;
-    const from = { x: image.x, y: image.y, width: image.width, height: image.height };
-    if (from.x === to.x && from.y === to.y && from.width === to.width && from.height === to.height) return;
-    this.applyRect(image, to);
-    this.push({ type: 'image-resize', id, from, to });
+  // Reshapes a selection — ink and pictures together — as one step. Each stroke
+  // is swapped for a reshaped copy that keeps its id, so whatever holds the
+  // selection still holds it; each picture's rectangle moves. Undo swaps the
+  // originals straight back rather than running the arithmetic in reverse, so
+  // nothing drifts however many times it goes back and forth.
+  transformItems(strokes: Stroke[], images: { id: string; to: Rect }[]): void {
+    const reshaped = new Map(strokes.map((s) => [s.id, s]));
+    const changes: StrokeReplacement[] = [];
+    this.strokes.forEach((before, index) => {
+      const after = reshaped.get(before.id);
+      if (after) changes.push({ index, before, after: [after] });
+    });
+    const rects: { id: string; from: Rect; to: Rect }[] = [];
+    for (const { id, to } of images) {
+      const image = this.images.find((im) => im.id === id);
+      if (!image) continue;
+      const from = { x: image.x, y: image.y, width: image.width, height: image.height };
+      if (from.x === to.x && from.y === to.y && from.width === to.width && from.height === to.height) continue;
+      rects.push({ id, from, to });
+    }
+    if (changes.length === 0 && rects.length === 0) return;
+    this.applyStrokeReplacements(changes, true);
+    for (const r of rects) this.applyRectById(r.id, r.to);
+    this.push({ type: 'transform', changes, images: rects });
   }
 
   private applyRect(image: BoardImage, r: Rect): void {
@@ -527,6 +573,18 @@ export class Board {
     } else if (op.type === 'add-many') {
       const ids = new Set(op.strokes.map((stroke) => stroke.id));
       this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
+    } else if (op.type === 'add-items') {
+      const ids = new Set(op.strokes.map((stroke) => stroke.id));
+      const pics = new Set(op.images.map((image) => image.id));
+      if (ids.size) this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
+      if (pics.size) this.images = this.images.filter((image) => !pics.has(image.id));
+    } else if (op.type === 'remove-items') {
+      for (const { index, stroke } of op.strokes) {
+        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
+      }
+      for (const { index, image } of op.images) {
+        this.images.splice(Math.min(index, this.images.length), 0, image);
+      }
     } else if (op.type === 'remove') {
       for (const { index, stroke } of op.removed) {
         this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
@@ -549,8 +607,9 @@ export class Board {
       for (const { index, image } of op.removed) {
         this.images.splice(Math.min(index, this.images.length), 0, image);
       }
-    } else if (op.type === 'image-resize') {
-      this.applyRectById(op.id, op.from);
+    } else if (op.type === 'transform') {
+      this.applyStrokeReplacements(op.changes, false);
+      for (const r of op.images) this.applyRectById(r.id, r.from);
     } else if (op.type === 'image-src') {
       this.applyImageSrcById(op.id, op.from);
     } else if (op.type === 'layer-add') {
@@ -600,6 +659,14 @@ export class Board {
       this.strokes.push(op.stroke);
     } else if (op.type === 'add-many') {
       this.strokes.push(...op.strokes);
+    } else if (op.type === 'add-items') {
+      this.strokes.push(...op.strokes);
+      this.images.push(...op.images);
+    } else if (op.type === 'remove-items') {
+      const ids = new Set(op.strokes.map(({ stroke }) => stroke.id));
+      const pics = new Set(op.images.map(({ image }) => image.id));
+      if (ids.size) this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
+      if (pics.size) this.images = this.images.filter((image) => !pics.has(image.id));
     } else if (op.type === 'remove') {
       const ids = new Set(op.removed.map((r) => r.stroke.id));
       this.strokes = this.strokes.filter((s) => !ids.has(s.id));
@@ -618,8 +685,9 @@ export class Board {
     } else if (op.type === 'image-remove') {
       const gone = new Set(op.removed.map((r) => r.image.id));
       this.images = this.images.filter((im) => !gone.has(im.id));
-    } else if (op.type === 'image-resize') {
-      this.applyRectById(op.id, op.to);
+    } else if (op.type === 'transform') {
+      this.applyStrokeReplacements(op.changes, true);
+      for (const r of op.images) this.applyRectById(r.id, r.to);
     } else if (op.type === 'image-src') {
       this.applyImageSrcById(op.id, op.to);
     } else if (op.type === 'layer-add') {
