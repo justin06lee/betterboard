@@ -1,15 +1,18 @@
-import { buildPath, hashSeed } from './ink';
-import type { BBox, BoardImage, BrushId, Camera, Frame, Layer, Onion, Stroke } from './types';
-import { MAX_FPS, MIN_FPS, defaultOnion, emptyBBox, growBBox, isBrush, newFrame, newLayer, uid } from './types';
+import type { BoardSnapshot } from './codec';
+import { parseBoardJSON } from './codec';
+import { movedStroke, scaledStroke } from './points';
+import { SpatialIndex } from './spatial';
+import type { BBox, BoardImage, Camera, Frame, Layer, Onion, Stroke } from './types';
+import { MAX_FPS, MIN_FPS, defaultOnion, emptyBBox, growBBox, imageBBox, newFrame, newLayer, uid } from './types';
 
 export type Op =
   | { type: 'add'; stroke: Stroke }
   | { type: 'add-many'; strokes: Stroke[] }
   | { type: 'add-items'; strokes: Stroke[]; images: BoardImage[] }
-  | { type: 'remove-items'; strokes: { index: number; stroke: Stroke }[]; images: { index: number; image: BoardImage }[] }
-  | { type: 'remove'; removed: { index: number; stroke: Stroke }[] }
+  | { type: 'remove-items'; strokes: Stroke[]; images: { index: number; image: BoardImage }[] }
+  | { type: 'remove'; strokes: Stroke[] }
   | { type: 'replace'; changes: StrokeReplacement[]; imageChanges?: ImageSrcChange[] }
-  | { type: 'clear'; strokes: { index: number; stroke: Stroke }[]; images: { index: number; image: BoardImage }[] }
+  | { type: 'clear'; strokes: Stroke[]; images: { index: number; image: BoardImage }[] }
   | { type: 'scale'; factor: number }
   | { type: 'move'; ids: string[]; images: string[]; dx: number; dy: number }
   | { type: 'image-add'; image: BoardImage }
@@ -17,10 +20,10 @@ export type Op =
   | { type: 'transform'; changes: StrokeReplacement[]; images: { id: string; from: Rect; to: Rect }[] }
   | { type: 'image-src'; id: string; from: string; to: string }
   | { type: 'layer-add'; index: number; layer: Layer }
-  | { type: 'layer-remove'; index: number; layer: Layer; removed: { index: number; stroke: Stroke }[]; removedImages: BoardImage[] }
+  | { type: 'layer-remove'; index: number; layer: Layer; strokes: Stroke[]; removedImages: BoardImage[] }
   | { type: 'layer-order'; from: number; to: number }
   | { type: 'frame-add'; index: number; frame: Frame; added: Stroke[]; addedImages: BoardImage[] }
-  | { type: 'frame-remove'; index: number; frame: Frame; removed: { index: number; stroke: Stroke }[]; removedImages: BoardImage[] }
+  | { type: 'frame-remove'; index: number; frame: Frame; strokes: Stroke[]; removedImages: BoardImage[] }
   | { type: 'frame-order'; from: number; to: number };
 
 export interface Rect {
@@ -30,8 +33,9 @@ export interface Rect {
   height: number;
 }
 
+// A stroke and what took its place: eraser fragments (any number of them,
+// none included), or a reshaped copy.
 export interface StrokeReplacement {
-  index: number;
   before: Stroke;
   after: Stroke[];
 }
@@ -45,10 +49,24 @@ export interface ImageSrcChange {
 
 const MAX_UNDO = 500;
 
+// One cell of the frame × layer grid: its strokes, indexed by where they sit,
+// and its pictures.
+interface Cell {
+  strokes: SpatialIndex<Stroke>;
+  images: BoardImage[];
+  top: number; // the highest seq ever placed here
+}
+
+const NO_IMAGES: readonly BoardImage[] = [];
+
 export class Board {
-  // Flat, in draw order within a layer; cross-layer order comes from `layers`,
-  // so a stroke never has to move in this array when layers are reordered.
-  strokes: Stroke[] = [];
+  // Every stroke on the board, by id. There is no meaningful order to keep:
+  // ink is painted by seq within its layer, whatever order it is stored in. So
+  // the board is a map, and finding, adding or removing a stroke — which is
+  // all any edit or undo ever does — costs the same on a board of ten strokes
+  // as on a board of a million. Nothing walks the whole board to make an edit.
+  private all = new Map<string, Stroke>();
+  private list: Stroke[] | null = [];
   images: BoardImage[] = [];
   // Handed out to strokes and images alike; see Stroke.seq.
   private nextSeq = 0;
@@ -65,6 +83,27 @@ export class Board {
   private redoStack: Op[] = [];
   onChange: (() => void) | null = null;
 
+  // Where the content changed, reported as it happens, for the renderer's tile
+  // cache. `onAppend` is the common case worth telling apart — a stroke that
+  // lands on top of everything already in its cell can simply be painted over
+  // what is cached.
+  onDirty: ((frame: string, layer: string, box: BBox) => void) | null = null;
+  onAppend: ((stroke: Stroke) => void) | null = null;
+  // Every stroke that joins or leaves the board, one at a time — how the
+  // autosave keeps track of which of its files an edit has touched.
+  onMembership: ((stroke: Stroke, added: boolean) => void) | null = null;
+  private resets: (() => void)[] = [];
+  // Bumped on every change to what is on the board.
+  revision = 0;
+
+  private cells = new Map<string, Map<string, Cell>>();
+  private pending: Map<Cell, { frame: string; layer: string; box: BBox }> | null = null;
+
+  // Everything changed at once — a load, or the world rescaled.
+  whenReset(fn: () => void): void {
+    this.resets.push(fn);
+  }
+
   private changed(): void {
     this.onChange?.();
   }
@@ -80,14 +119,281 @@ export class Board {
     return this.nextSeq++;
   }
 
+  peekSeq(): number {
+    return this.nextSeq;
+  }
+
+  // Every stroke on the board, as a list: built when asked for and kept until
+  // the board next changes. Whatever holds one keeps a consistent snapshot —
+  // the board never writes into a list it has handed out.
+  get strokes(): Stroke[] {
+    return (this.list ??= [...this.all.values()]);
+  }
+
+  get strokeCount(): number {
+    return this.all.size;
+  }
+
+  eachStroke(): IterableIterator<Stroke> {
+    return this.all.values();
+  }
+
+  // ---- indexes ------------------------------------------------------------
+
+  private cell(frame: string, layer: string, create = false): Cell | undefined {
+    let layers = this.cells.get(frame);
+    if (!layers) {
+      if (!create) return undefined;
+      layers = new Map();
+      this.cells.set(frame, layers);
+    }
+    let cell = layers.get(layer);
+    if (!cell && create) {
+      cell = { strokes: new SpatialIndex<Stroke>(), images: [], top: -Infinity };
+      layers.set(layer, cell);
+    }
+    return cell;
+  }
+
+  private dirty(cell: Cell, frame: string, layer: string, box: BBox): void {
+    this.revision++;
+    if (!this.pending) {
+      this.onDirty?.(frame, layer, box);
+      return;
+    }
+    const acc = this.pending.get(cell);
+    if (!acc) {
+      this.pending.set(cell, { frame, layer, box: { ...box } });
+      return;
+    }
+    growBBox(acc.box, box.minX, box.minY, 0);
+    growBBox(acc.box, box.maxX, box.maxY, 0);
+  }
+
+  // Folds every region `fn` dirties into one report per cell: a clear or an
+  // undo can touch a million strokes, and one report beats a million.
+  private batch(fn: () => void): void {
+    if (this.pending) {
+      fn();
+      return;
+    }
+    this.pending = new Map();
+    try {
+      fn();
+    } finally {
+      const pending = this.pending;
+      this.pending = null;
+      for (const { frame, layer, box } of pending.values()) this.onDirty?.(frame, layer, box);
+    }
+  }
+
+  // `fresh` marks a stroke that has just been made — drawn, pasted, redone —
+  // as opposed to one being put back somewhere in the middle of the pile.
+  private attach(s: Stroke, fresh: boolean): void {
+    this.all.set(s.id, s);
+    this.list = null;
+    const cell = this.cell(s.frame, s.layer, true)!;
+    cell.strokes.insert(s);
+    this.onMembership?.(s, true);
+    if (fresh && s.seq > cell.top) {
+      cell.top = s.seq;
+      this.revision++;
+      this.onAppend?.(s);
+      return;
+    }
+    if (s.seq > cell.top) cell.top = s.seq;
+    this.dirty(cell, s.frame, s.layer, s.bbox);
+  }
+
+  // False if `s` is not what the board holds under its id.
+  private detach(s: Stroke): boolean {
+    if (this.all.get(s.id) !== s) return false;
+    this.all.delete(s.id);
+    this.list = null;
+    this.onMembership?.(s, false);
+    const cell = this.cell(s.frame, s.layer);
+    if (cell) {
+      cell.strokes.remove(s);
+      this.dirty(cell, s.frame, s.layer, s.bbox);
+    }
+    return true;
+  }
+
+  // Takes whichever of these strokes are on the board off it; hands back those.
+  private take(strokes: Iterable<Stroke>): Stroke[] {
+    const taken: Stroke[] = [];
+    this.batch(() => {
+      for (const s of strokes) if (this.detach(s)) taken.push(s);
+    });
+    return taken;
+  }
+
+  private takeIds(ids: Iterable<string>): Stroke[] {
+    const taken: Stroke[] = [];
+    this.batch(() => {
+      for (const id of ids) {
+        const s = this.all.get(id);
+        if (s && this.detach(s)) taken.push(s);
+      }
+    });
+    return taken;
+  }
+
+  private put(strokes: readonly Stroke[], fresh: boolean): void {
+    this.batch(() => {
+      for (const s of strokes) this.attach(s, fresh);
+    });
+  }
+
+  private attachImage(im: BoardImage): void {
+    const cell = this.cell(im.frame, im.layer, true)!;
+    cell.images.push(im);
+    if (im.seq > cell.top) cell.top = im.seq;
+    this.dirty(cell, im.frame, im.layer, imageBBox(im));
+  }
+
+  private detachImage(im: BoardImage): void {
+    const cell = this.cell(im.frame, im.layer);
+    if (!cell) return;
+    const i = cell.images.indexOf(im);
+    if (i >= 0) cell.images.splice(i, 1);
+    this.dirty(cell, im.frame, im.layer, imageBBox(im));
+  }
+
+  // A picture changed where it stands: moved, resized, or its bitmap swapped.
+  private imageChanged(im: BoardImage, before?: BBox): void {
+    const cell = this.cell(im.frame, im.layer, true)!;
+    if (before) this.dirty(cell, im.frame, im.layer, before);
+    this.dirty(cell, im.frame, im.layer, imageBBox(im));
+  }
+
+  // Every index rebuilt from scratch — after a load, or a rescale that has
+  // moved everything at once.
+  private reindex(): void {
+    this.cells.clear();
+    this.list = null;
+    for (const s of this.all.values()) {
+      const cell = this.cell(s.frame, s.layer, true)!;
+      cell.strokes.insert(s);
+      if (s.seq > cell.top) cell.top = s.seq;
+    }
+    for (const im of this.images) {
+      const cell = this.cell(im.frame, im.layer, true)!;
+      cell.images.push(im);
+      if (im.seq > cell.top) cell.top = im.seq;
+    }
+    this.revision++;
+    for (const fn of this.resets) fn();
+  }
+
+  // Pictures are few, and do keep their order in a list.
+  private extractImages(drop: (im: BoardImage) => boolean): { index: number; image: BoardImage }[] {
+    const removed: { index: number; image: BoardImage }[] = [];
+    for (let i = 0; i < this.images.length; i++) {
+      if (drop(this.images[i])) removed.push({ index: i, image: this.images[i] });
+    }
+    if (removed.length === 0) return removed;
+    this.images = this.images.filter((im) => !drop(im));
+    this.batch(() => {
+      for (const r of removed) this.detachImage(r.image);
+    });
+    return removed;
+  }
+
+  private restoreImages(entries: readonly { index: number; image: BoardImage }[]): void {
+    this.batch(() => {
+      for (const { index, image } of entries) {
+        this.images.splice(Math.min(index, this.images.length), 0, image);
+        this.attachImage(image);
+      }
+    });
+  }
+
+  private appendImages(images: readonly BoardImage[]): void {
+    this.batch(() => {
+      for (const image of images) {
+        this.hydrate(image);
+        this.images.push(image);
+        this.attachImage(image);
+      }
+    });
+  }
+
+  // ---- queries --------------------------------------------------------------
+
+  stroke(id: string): Stroke | undefined {
+    return this.all.get(id);
+  }
+
+  // The strokes of one cell whose bounds reach into `box`, in no particular
+  // order — whoever paints them sorts by seq.
+  query(frame: string, layer: string, box: BBox, out: Stroke[] = []): Stroke[] {
+    const cell = this.cell(frame, layer);
+    return cell ? cell.strokes.query(box, out) : out;
+  }
+
+  cellStrokes(frame: string, layer: string): Stroke[] {
+    return this.cell(frame, layer)?.strokes.all() ?? [];
+  }
+
+  cellImages(frame: string, layer: string): readonly BoardImage[] {
+    return this.cell(frame, layer)?.images ?? NO_IMAGES;
+  }
+
+  // Strokes and pictures in one cell, or in a whole frame.
+  count(frame: string, layer?: string): number {
+    const layers = this.cells.get(frame);
+    if (!layers) return 0;
+    if (layer !== undefined) {
+      const cell = layers.get(layer);
+      return cell ? cell.strokes.size + cell.images.length : 0;
+    }
+    let n = 0;
+    for (const cell of layers.values()) n += cell.strokes.size + cell.images.length;
+    return n;
+  }
+
+  // Every stroke in a frame, in no particular order.
+  frameStrokes(frame: string = this.activeFrame): Stroke[] {
+    const out: Stroke[] = [];
+    for (const cell of this.cells.get(frame)?.values() ?? []) cell.strokes.forEach((s) => out.push(s));
+    return out;
+  }
+
+  visibleStrokes(frame: string = this.activeFrame): Stroke[] {
+    const out: Stroke[] = [];
+    for (const layer of this.layers) {
+      if (layer.visible) this.cell(frame, layer.id)?.strokes.forEach((s) => out.push(s));
+    }
+    return out;
+  }
+
+  // The strokes on a frame's visible layers that reach into `box`.
+  visibleStrokesIn(frame: string, box: BBox): Stroke[] {
+    const out: Stroke[] = [];
+    for (const layer of this.layers) {
+      if (layer.visible) this.query(frame, layer.id, box, out);
+    }
+    return out;
+  }
+
+  // Every stroke on one layer, across all frames.
+  private layerStrokes(layer: string): Stroke[] {
+    const out: Stroke[] = [];
+    for (const layers of this.cells.values()) layers.get(layer)?.strokes.forEach((s) => out.push(s));
+    return out;
+  }
+
+  // ---- strokes and pictures -----------------------------------------------
+
   addStroke(stroke: Stroke): void {
-    this.strokes.push(stroke);
+    this.attach(stroke, true);
     this.push({ type: 'add', stroke });
   }
 
   addStrokes(strokes: Stroke[]): void {
     if (strokes.length === 0) return;
-    this.strokes.push(...strokes);
+    this.put(strokes, true);
     this.push({ type: 'add-many', strokes });
   }
 
@@ -95,45 +401,29 @@ export class Board {
   // stamped down — are one thing that happened, so they undo in one step.
   addItems(strokes: Stroke[], images: BoardImage[]): void {
     if (strokes.length === 0 && images.length === 0) return;
-    this.strokes.push(...strokes);
-    for (const image of images) {
-      this.hydrate(image);
-      this.images.push(image);
-    }
+    this.put(strokes, true);
+    this.appendImages(images);
     this.push({ type: 'add-items', strokes, images });
   }
 
   // The other half of addItems: deleting a mixed selection is one step, so
   // getting it back is one press of undo rather than one per kind.
   removeItems(strokeIds: Set<string>, imageIds: Set<string>): void {
-    const strokes = this.strokes
-      .map((stroke, index) => ({ index, stroke }))
-      .filter(({ stroke }) => strokeIds.has(stroke.id));
-    const images = this.images
-      .map((image, index) => ({ index, image }))
-      .filter(({ image }) => imageIds.has(image.id));
+    const strokes = this.takeIds(strokeIds);
+    const images = imageIds.size ? this.extractImages((im) => imageIds.has(im.id)) : [];
     if (strokes.length === 0 && images.length === 0) return;
-    if (strokes.length) this.strokes = this.strokes.filter((stroke) => !strokeIds.has(stroke.id));
-    if (images.length) this.images = this.images.filter((image) => !imageIds.has(image.id));
     this.push({ type: 'remove-items', strokes, images });
   }
 
-  // ---- images -------------------------------------------------------------
-
   addImage(image: BoardImage): void {
-    this.hydrate(image);
-    this.images.push(image);
+    this.appendImages([image]);
     this.push({ type: 'image-add', image });
   }
 
   removeImages(ids: Set<string>): void {
     if (ids.size === 0) return;
-    const removed: { index: number; image: BoardImage }[] = [];
-    for (let i = 0; i < this.images.length; i++) {
-      if (ids.has(this.images[i].id)) removed.push({ index: i, image: this.images[i] });
-    }
+    const removed = this.extractImages((im) => ids.has(im.id));
     if (removed.length === 0) return;
-    this.images = this.images.filter((im) => !ids.has(im.id));
     this.push({ type: 'image-remove', removed });
   }
 
@@ -143,12 +433,11 @@ export class Board {
   // originals straight back rather than running the arithmetic in reverse, so
   // nothing drifts however many times it goes back and forth.
   transformItems(strokes: Stroke[], images: { id: string; to: Rect }[]): void {
-    const reshaped = new Map(strokes.map((s) => [s.id, s]));
     const changes: StrokeReplacement[] = [];
-    this.strokes.forEach((before, index) => {
-      const after = reshaped.get(before.id);
-      if (after) changes.push({ index, before, after: [after] });
-    });
+    for (const after of strokes) {
+      const before = this.all.get(after.id);
+      if (before) changes.push({ before, after: [after] });
+    }
     const rects: { id: string; from: Rect; to: Rect }[] = [];
     for (const { id, to } of images) {
       const image = this.images.find((im) => im.id === id);
@@ -158,21 +447,20 @@ export class Board {
       rects.push({ id, from, to });
     }
     if (changes.length === 0 && rects.length === 0) return;
-    this.applyStrokeReplacements(changes, true);
+    this.applyReplacements(changes, true);
     for (const r of rects) this.applyRectById(r.id, r.to);
     this.push({ type: 'transform', changes, images: rects });
   }
 
-  private applyRect(image: BoardImage, r: Rect): void {
+  private applyRectById(id: string, r: Rect): void {
+    const image = this.images.find((im) => im.id === id);
+    if (!image) return;
+    const before = imageBBox(image);
     image.x = r.x;
     image.y = r.y;
     image.width = r.width;
     image.height = r.height;
-  }
-
-  private applyRectById(id: string, r: Rect): void {
-    const image = this.images.find((im) => im.id === id);
-    if (image) this.applyRect(image, r);
+    this.imageChanged(image, before);
   }
 
   // Swaps a picture's bitmap for an edited one (wand cut-out, pixel erase).
@@ -187,6 +475,7 @@ export class Board {
   private applyImageSrc(image: BoardImage, src: string): void {
     image.src = src;
     image.el = undefined;
+    this.imageChanged(image);
     this.hydrate(image);
   }
 
@@ -208,12 +497,15 @@ export class Board {
   // rather than holding up everything else.
   hydrate(image: BoardImage): void {
     if (image.el) return;
+    const src = image.src;
     const el = new Image();
     el.onload = () => {
+      if (image.src !== src) return; // a later bitmap has replaced this one
       image.el = el;
+      if (this.cell(image.frame, image.layer)) this.onDirty?.(image.frame, image.layer, imageBBox(image));
       this.onRedraw?.();
     };
-    el.src = image.src;
+    el.src = src;
   }
 
   // ---- layers -------------------------------------------------------------
@@ -224,15 +516,6 @@ export class Board {
 
   get active(): Layer {
     return this.layer(this.activeLayer) ?? this.layers[this.layers.length - 1];
-  }
-
-  frameStrokes(frame: string = this.activeFrame): Stroke[] {
-    return this.strokes.filter((s) => s.frame === frame);
-  }
-
-  visibleStrokes(frame: string = this.activeFrame): Stroke[] {
-    const hidden = new Set(this.layers.filter((l) => !l.visible).map((l) => l.id));
-    return this.strokes.filter((s) => s.frame === frame && !hidden.has(s.layer));
   }
 
   setActiveLayer(id: string): void {
@@ -260,18 +543,13 @@ export class Board {
     const index = this.layers.findIndex((l) => l.id === id);
     if (index < 0) return false;
     const layer = this.layers[index];
-    const removed: { index: number; stroke: Stroke }[] = [];
-    for (let i = 0; i < this.strokes.length; i++) {
-      if (this.strokes[i].layer === id) removed.push({ index: i, stroke: this.strokes[i] });
-    }
     this.layers.splice(index, 1);
-    this.strokes = this.strokes.filter((s) => s.layer !== id);
-    const removedImages = this.images.filter((im) => im.layer === id);
-    if (removedImages.length) this.images = this.images.filter((im) => im.layer !== id);
+    const strokes = this.take(this.layerStrokes(id));
+    const removedImages = this.extractImages((im) => im.layer === id).map((r) => r.image);
     if (this.activeLayer === id) {
       this.activeLayer = this.layers[Math.min(index, this.layers.length - 1)].id;
     }
-    this.push({ type: 'layer-remove', index, layer, removed, removedImages });
+    this.push({ type: 'layer-remove', index, layer, strokes, removedImages });
     return true;
   }
 
@@ -310,7 +588,8 @@ export class Board {
   }
 
   // A new frame lands right after the current one, so drawing runs left to
-  // right. Duplicating copies the current frame's strokes onto it.
+  // right. Duplicating copies the current frame's strokes onto it — sharing
+  // their points and outlines, which never change.
   addFrame(duplicate = false): Frame {
     const frame = newFrame();
     const index = this.frameIndex + 1;
@@ -318,35 +597,19 @@ export class Board {
     const added: Stroke[] = [];
     const addedImages: BoardImage[] = [];
     if (duplicate) {
-      const contents = [
-        ...this.frameStrokes().map((stroke) => ({ kind: 'stroke' as const, seq: stroke.seq, stroke })),
-        ...this.imagesOn().map((image) => ({ kind: 'image' as const, seq: image.seq, image })),
-      ].sort((a, b) => a.seq - b.seq);
+      const contents: ({ seq: number; stroke: Stroke; image: null } | { seq: number; stroke: null; image: BoardImage })[] = [];
+      for (const stroke of this.frameStrokes()) contents.push({ seq: stroke.seq, stroke, image: null });
+      for (const image of this.imagesOn()) contents.push({ seq: image.seq, stroke: null, image });
+      contents.sort((a, b) => a.seq - b.seq);
       for (const item of contents) {
-        if (item.kind === 'stroke') {
-          const copy: Stroke = {
-            ...item.stroke,
-            id: uid(),
-            seq: this.takeSeq(),
-            frame: frame.id,
-            points: item.stroke.points.map((pt) => ({ ...pt })),
-            bbox: { ...item.stroke.bbox },
-          };
-          copy.path = buildPath(copy);
-          added.push(copy);
+        if (item.stroke) {
+          added.push({ ...item.stroke, id: uid(), seq: this.takeSeq(), frame: frame.id, mark: undefined });
         } else {
-          const copy: BoardImage = {
-            ...item.image,
-            id: uid(),
-            seq: this.takeSeq(),
-            frame: frame.id,
-            el: item.image.el,
-          };
-          addedImages.push(copy);
+          addedImages.push({ ...item.image, id: uid(), seq: this.takeSeq(), frame: frame.id, el: item.image.el });
         }
       }
-      this.strokes.push(...added);
-      this.images.push(...addedImages);
+      this.put(added, true);
+      this.appendImages(addedImages);
     }
     this.activeFrame = frame.id;
     this.push({ type: 'frame-add', index, frame, added, addedImages });
@@ -358,18 +621,13 @@ export class Board {
     const index = this.frames.findIndex((f) => f.id === id);
     if (index < 0) return false;
     const frame = this.frames[index];
-    const removed: { index: number; stroke: Stroke }[] = [];
-    for (let i = 0; i < this.strokes.length; i++) {
-      if (this.strokes[i].frame === id) removed.push({ index: i, stroke: this.strokes[i] });
-    }
     this.frames.splice(index, 1);
-    this.strokes = this.strokes.filter((s) => s.frame !== id);
-    const removedImages = this.images.filter((im) => im.frame === id);
-    if (removedImages.length) this.images = this.images.filter((im) => im.frame !== id);
+    const strokes = this.take(this.frameStrokes(id));
+    const removedImages = this.extractImages((im) => im.frame === id).map((r) => r.image);
     if (this.activeFrame === id) {
       this.activeFrame = this.frames[Math.min(index, this.frames.length - 1)].id;
     }
-    this.push({ type: 'frame-remove', index, frame, removed, removedImages });
+    this.push({ type: 'frame-remove', index, frame, strokes, removedImages });
     return true;
   }
 
@@ -428,13 +686,9 @@ export class Board {
   // Removes strokes by id; a single gesture's erasures collapse into one undo step.
   removeStrokes(ids: Set<string>): void {
     if (ids.size === 0) return;
-    const removed: { index: number; stroke: Stroke }[] = [];
-    for (let i = 0; i < this.strokes.length; i++) {
-      if (ids.has(this.strokes[i].id)) removed.push({ index: i, stroke: this.strokes[i] });
-    }
-    if (removed.length === 0) return;
-    this.strokes = this.strokes.filter((s) => !ids.has(s.id));
-    this.push({ type: 'remove', removed });
+    const strokes = this.takeIds(ids);
+    if (strokes.length === 0) return;
+    this.push({ type: 'remove', strokes });
   }
 
   // Replaces one or more strokes with clipped fragments, optionally alongside
@@ -444,48 +698,37 @@ export class Board {
   // picture's working canvas — so only the source strings still have to move.
   replaceStrokes(changes: StrokeReplacement[], imageChanges: ImageSrcChange[] = []): void {
     if (changes.length === 0 && imageChanges.length === 0) return;
-    const sorted = [...changes].sort((a, b) => a.index - b.index);
-    this.applyStrokeReplacements(sorted, true);
+    this.applyReplacements(changes, true);
     for (const change of imageChanges) {
       const image = this.images.find((im) => im.id === change.id);
       if (image) image.src = change.to;
     }
-    this.push({ type: 'replace', changes: sorted, imageChanges });
+    this.push({ type: 'replace', changes, imageChanges });
   }
 
-  private applyStrokeReplacements(changes: StrokeReplacement[], forward: boolean): void {
-    let offset = 0;
-    const positioned = changes.map((change) => {
-      const positionedChange = { change, at: change.index + offset };
-      offset += change.after.length - 1;
-      return positionedChange;
+  // What comes off is found by id, not by object: a move made since this edit
+  // swapped in a copy under the same id, and undoing that move made another.
+  private applyReplacements(changes: StrokeReplacement[], forward: boolean): void {
+    this.batch(() => {
+      for (const change of changes) {
+        const off = forward ? [change.before] : change.after;
+        const on = forward ? change.after : [change.before];
+        for (const s of off) {
+          const held = this.all.get(s.id);
+          if (held) this.detach(held);
+        }
+        for (const s of on) this.attach(s, false);
+      }
     });
-    if (forward) {
-      for (const { change, at } of positioned) {
-        this.strokes.splice(at, 1, ...change.after);
-      }
-    } else {
-      for (let i = positioned.length - 1; i >= 0; i--) {
-        const { change, at } = positioned[i];
-        this.strokes.splice(at, change.after.length, change.before);
-      }
-    }
   }
 
   // Clears the current frame only — wiping every frame at once is not something
   // a single menu item should be able to do to an animation.
   clear(): void {
-    const strokes = this.strokes
-      .map((stroke, index) => ({ index, stroke }))
-      .filter(({ stroke }) => stroke.frame === this.activeFrame);
-    const images = this.images
-      .map((image, index) => ({ index, image }))
-      .filter(({ image }) => image.frame === this.activeFrame);
+    const frame = this.activeFrame;
+    const strokes = this.take(this.frameStrokes(frame));
+    const images = this.extractImages((im) => im.frame === frame);
     if (strokes.length === 0 && images.length === 0) return;
-    const strokeIds = new Set(strokes.map(({ stroke }) => stroke.id));
-    const imageIds = new Set(images.map(({ image }) => image.id));
-    this.strokes = this.strokes.filter((s) => !strokeIds.has(s.id));
-    this.images = this.images.filter((im) => !imageIds.has(im.id));
     this.push({ type: 'clear', strokes, images });
   }
 
@@ -499,8 +742,9 @@ export class Board {
     this.push({ type: 'scale', factor });
   }
 
-  // Translates a selection. The cached outline is reused under a translation
-  // matrix rather than rebuilt, so dragging stays cheap on large selections.
+  // Translates a selection. Each stroke is swapped for a moved copy; its
+  // points are relative to its own origin, so the copy shares them, and its
+  // outline too.
   moveItems(strokeIds: Set<string>, imageIds: Set<string>, dx: number, dy: number): void {
     if ((strokeIds.size === 0 && imageIds.size === 0) || (dx === 0 && dy === 0)) return;
     const ids = [...strokeIds];
@@ -511,30 +755,21 @@ export class Board {
 
   private applyMove(ids: string[], imageIds: string[], dx: number, dy: number): void {
     const pictures = new Set(imageIds);
-    for (const im of this.images) {
-      if (!pictures.has(im.id)) continue;
-      im.x += dx;
-      im.y += dy;
-    }
-    const set = new Set(ids);
-    for (const s of this.strokes) {
-      if (!set.has(s.id)) continue;
-      for (const pt of s.points) {
-        pt.x += dx;
-        pt.y += dy;
+    this.batch(() => {
+      for (const im of this.images) {
+        if (!pictures.has(im.id)) continue;
+        const before = imageBBox(im);
+        im.x += dx;
+        im.y += dy;
+        this.imageChanged(im, before);
       }
-      s.bbox = {
-        minX: s.bbox.minX + dx,
-        minY: s.bbox.minY + dy,
-        maxX: s.bbox.maxX + dx,
-        maxY: s.bbox.maxY + dy,
-      };
-      if (s.path) {
-        const moved = new Path2D();
-        moved.addPath(s.path, new DOMMatrix().translate(dx, dy));
-        s.path = moved;
+      for (const id of ids) {
+        const s = this.all.get(id);
+        if (!s) continue;
+        this.detach(s);
+        this.attach(movedStroke(s, dx, dy), false);
       }
-    }
+    });
   }
 
   private applyScale(f: number): void {
@@ -544,17 +779,10 @@ export class Board {
       im.width *= f;
       im.height *= f;
     }
-    for (const s of this.strokes) {
-      for (const pt of s.points) {
-        pt.x *= f;
-        pt.y *= f;
-      }
-      s.size *= f;
-      const b = emptyBBox();
-      for (const pt of s.points) growBBox(b, pt.x, pt.y, s.size / 2 + 2);
-      s.bbox = b;
-      s.path = buildPath(s);
-    }
+    const scaled = new Map<string, Stroke>();
+    for (const s of this.all.values()) scaled.set(s.id, scaledStroke(s, f));
+    this.all = scaled;
+    this.reindex();
   }
 
   get canUndo(): boolean {
@@ -569,46 +797,32 @@ export class Board {
     const op = this.undoStack.pop();
     if (!op) return undefined;
     if (op.type === 'add') {
-      this.strokes = this.strokes.filter((s) => s.id !== op.stroke.id);
+      this.takeIds([op.stroke.id]);
     } else if (op.type === 'add-many') {
-      const ids = new Set(op.strokes.map((stroke) => stroke.id));
-      this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
+      this.takeIds(op.strokes.map((s) => s.id));
     } else if (op.type === 'add-items') {
-      const ids = new Set(op.strokes.map((stroke) => stroke.id));
       const pics = new Set(op.images.map((image) => image.id));
-      if (ids.size) this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
-      if (pics.size) this.images = this.images.filter((image) => !pics.has(image.id));
+      this.takeIds(op.strokes.map((s) => s.id));
+      if (pics.size) this.extractImages((image) => pics.has(image.id));
     } else if (op.type === 'remove-items') {
-      for (const { index, stroke } of op.strokes) {
-        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
-      }
-      for (const { index, image } of op.images) {
-        this.images.splice(Math.min(index, this.images.length), 0, image);
-      }
+      this.put(op.strokes, false);
+      this.restoreImages(op.images);
     } else if (op.type === 'remove') {
-      for (const { index, stroke } of op.removed) {
-        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
-      }
+      this.put(op.strokes, false);
     } else if (op.type === 'replace') {
-      this.applyStrokeReplacements(op.changes, false);
+      this.applyReplacements(op.changes, false);
       for (const change of op.imageChanges ?? []) this.applyImageSrcById(change.id, change.from);
     } else if (op.type === 'clear') {
-      for (const { index, stroke } of op.strokes) {
-        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
-      }
-      for (const { index, image } of op.images) {
-        this.images.splice(Math.min(index, this.images.length), 0, image);
-      }
+      this.put(op.strokes, false);
+      this.restoreImages(op.images);
     } else if (op.type === 'move') {
       this.applyMove(op.ids, op.images, -op.dx, -op.dy);
     } else if (op.type === 'image-add') {
-      this.images = this.images.filter((im) => im.id !== op.image.id);
+      this.extractImages((im) => im.id === op.image.id);
     } else if (op.type === 'image-remove') {
-      for (const { index, image } of op.removed) {
-        this.images.splice(Math.min(index, this.images.length), 0, image);
-      }
+      this.restoreImages(op.removed);
     } else if (op.type === 'transform') {
-      this.applyStrokeReplacements(op.changes, false);
+      this.applyReplacements(op.changes, false);
       for (const r of op.images) this.applyRectById(r.id, r.from);
     } else if (op.type === 'image-src') {
       this.applyImageSrcById(op.id, op.from);
@@ -619,28 +833,23 @@ export class Board {
       }
     } else if (op.type === 'layer-remove') {
       this.layers.splice(op.index, 0, op.layer);
-      for (const { index, stroke } of op.removed) {
-        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
-      }
-      this.images.push(...op.removedImages);
+      this.put(op.strokes, false);
+      this.appendImages(op.removedImages);
       this.activeLayer = op.layer.id;
     } else if (op.type === 'layer-order') {
       this.applyLayerMove(op.to, op.from);
     } else if (op.type === 'frame-add') {
-      const ids = new Set(op.added.map((s) => s.id));
       const pics = new Set(op.addedImages.map((im) => im.id));
       this.frames.splice(op.index, 1);
-      if (ids.size) this.strokes = this.strokes.filter((s) => !ids.has(s.id));
-      if (pics.size) this.images = this.images.filter((im) => !pics.has(im.id));
+      this.takeIds(op.added.map((s) => s.id));
+      if (pics.size) this.extractImages((im) => pics.has(im.id));
       if (this.activeFrame === op.frame.id) {
         this.activeFrame = this.frames[Math.min(op.index, this.frames.length - 1)].id;
       }
     } else if (op.type === 'frame-remove') {
       this.frames.splice(op.index, 0, op.frame);
-      for (const { index, stroke } of op.removed) {
-        this.strokes.splice(Math.min(index, this.strokes.length), 0, stroke);
-      }
-      this.images.push(...op.removedImages);
+      this.put(op.strokes, false);
+      this.appendImages(op.removedImages);
       this.activeFrame = op.frame.id;
     } else if (op.type === 'frame-order') {
       this.applyFrameMove(op.to, op.from);
@@ -656,37 +865,34 @@ export class Board {
     const op = this.redoStack.pop();
     if (!op) return undefined;
     if (op.type === 'add') {
-      this.strokes.push(op.stroke);
+      this.put([op.stroke], true);
     } else if (op.type === 'add-many') {
-      this.strokes.push(...op.strokes);
+      this.put(op.strokes, true);
     } else if (op.type === 'add-items') {
-      this.strokes.push(...op.strokes);
-      this.images.push(...op.images);
+      this.put(op.strokes, true);
+      this.appendImages(op.images);
     } else if (op.type === 'remove-items') {
-      const ids = new Set(op.strokes.map(({ stroke }) => stroke.id));
       const pics = new Set(op.images.map(({ image }) => image.id));
-      if (ids.size) this.strokes = this.strokes.filter((stroke) => !ids.has(stroke.id));
-      if (pics.size) this.images = this.images.filter((image) => !pics.has(image.id));
+      this.takeIds(op.strokes.map((s) => s.id));
+      if (pics.size) this.extractImages((image) => pics.has(image.id));
     } else if (op.type === 'remove') {
-      const ids = new Set(op.removed.map((r) => r.stroke.id));
-      this.strokes = this.strokes.filter((s) => !ids.has(s.id));
+      this.takeIds(op.strokes.map((s) => s.id));
     } else if (op.type === 'replace') {
-      this.applyStrokeReplacements(op.changes, true);
+      this.applyReplacements(op.changes, true);
       for (const change of op.imageChanges ?? []) this.applyImageSrcById(change.id, change.to);
     } else if (op.type === 'clear') {
-      const strokeIds = new Set(op.strokes.map(({ stroke }) => stroke.id));
       const imageIds = new Set(op.images.map(({ image }) => image.id));
-      this.strokes = this.strokes.filter((s) => !strokeIds.has(s.id));
-      this.images = this.images.filter((im) => !imageIds.has(im.id));
+      this.takeIds(op.strokes.map((s) => s.id));
+      this.extractImages((im) => imageIds.has(im.id));
     } else if (op.type === 'move') {
       this.applyMove(op.ids, op.images, op.dx, op.dy);
     } else if (op.type === 'image-add') {
-      this.images.push(op.image);
+      this.appendImages([op.image]);
     } else if (op.type === 'image-remove') {
       const gone = new Set(op.removed.map((r) => r.image.id));
-      this.images = this.images.filter((im) => !gone.has(im.id));
+      this.extractImages((im) => gone.has(im.id));
     } else if (op.type === 'transform') {
-      this.applyStrokeReplacements(op.changes, true);
+      this.applyReplacements(op.changes, true);
       for (const r of op.images) this.applyRectById(r.id, r.to);
     } else if (op.type === 'image-src') {
       this.applyImageSrcById(op.id, op.to);
@@ -694,11 +900,10 @@ export class Board {
       this.layers.splice(op.index, 0, op.layer);
       this.activeLayer = op.layer.id;
     } else if (op.type === 'layer-remove') {
-      const ids = new Set(op.removed.map((r) => r.stroke.id));
       const pics = new Set(op.removedImages.map((im) => im.id));
       this.layers.splice(op.index, 1);
-      this.strokes = this.strokes.filter((s) => !ids.has(s.id));
-      this.images = this.images.filter((im) => !pics.has(im.id));
+      this.takeIds(op.strokes.map((s) => s.id));
+      this.extractImages((im) => pics.has(im.id));
       if (this.activeLayer === op.layer.id) {
         this.activeLayer = this.layers[Math.min(op.index, this.layers.length - 1)].id;
       }
@@ -706,15 +911,14 @@ export class Board {
       this.applyLayerMove(op.from, op.to);
     } else if (op.type === 'frame-add') {
       this.frames.splice(op.index, 0, op.frame);
-      if (op.added.length) this.strokes.push(...op.added);
-      if (op.addedImages.length) this.images.push(...op.addedImages);
+      this.put(op.added, true);
+      this.appendImages(op.addedImages);
       this.activeFrame = op.frame.id;
     } else if (op.type === 'frame-remove') {
-      const ids = new Set(op.removed.map((r) => r.stroke.id));
       const pics = new Set(op.removedImages.map((im) => im.id));
       this.frames.splice(op.index, 1);
-      this.strokes = this.strokes.filter((s) => !ids.has(s.id));
-      this.images = this.images.filter((im) => !pics.has(im.id));
+      this.takeIds(op.strokes.map((s) => s.id));
+      this.extractImages((im) => pics.has(im.id));
       if (this.activeFrame === op.frame.id) {
         this.activeFrame = this.frames[Math.min(op.index, this.frames.length - 1)].id;
       }
@@ -747,165 +951,47 @@ export class Board {
     return box;
   }
 
-  contentBBox(strokes: Stroke[] = this.strokes, images: BoardImage[] = []): BBox | null {
-    if (strokes.length === 0 && images.length === 0) return null;
+  contentBBox(strokes: Iterable<Stroke> = this.all.values(), images: BoardImage[] = []): BBox | null {
     const b = emptyBBox();
+    let any = false;
     for (const s of strokes) {
+      any = true;
       growBBox(b, s.bbox.minX, s.bbox.minY, 0);
       growBBox(b, s.bbox.maxX, s.bbox.maxY, 0);
     }
     for (const im of images) {
+      any = true;
       growBBox(b, im.x, im.y, 0);
       growBBox(b, im.x + im.width, im.y + im.height, 0);
     }
-    return b;
+    return any ? b : null;
   }
 
-  serialize(camera: Camera): string {
-    return JSON.stringify({
-      app: 'betterboard',
-      version: 5,
-      camera,
-      layers: this.layers,
-      activeLayer: this.activeLayer,
-      frames: this.frames,
-      activeFrame: this.activeFrame,
-      fps: this.fps,
-      onion: this.onion,
-      images: this.images.map((im) => ({
-        id: im.id,
-        seq: im.seq,
-        src: im.src,
-        x: Math.round(im.x * 100) / 100,
-        y: Math.round(im.y * 100) / 100,
-        width: Math.round(im.width * 100) / 100,
-        height: Math.round(im.height * 100) / 100,
-        layer: im.layer,
-        frame: im.frame,
-      })),
-      strokes: this.strokes.map((s) => ({
-        id: s.id,
-        seq: s.seq,
-        color: s.color,
-        size: s.size,
-        pen: s.pen,
-        brush: s.brush,
-        seed: s.seed,
-        layer: s.layer,
-        frame: s.frame,
-        points: s.points.map((pt) => [
-          Math.round(pt.x * 10000) / 10000,
-          Math.round(pt.y * 10000) / 10000,
-          Math.round(pt.p * 1000) / 1000,
-        ]),
-      })),
-    });
-  }
+  // ---- loading ----------------------------------------------------------------
 
-  // Replaces board contents. Returns the saved camera, if any. Throws on bad input.
-  deserialize(json: string): Camera | null {
-    const data = JSON.parse(json);
-    if (data?.app !== 'betterboard' || !Array.isArray(data.strokes)) {
-      throw new Error('not a betterboard file');
-    }
-    // Version 1 files predate layers: everything they hold becomes one layer.
-    const layers: Layer[] = [];
-    for (const raw of Array.isArray(data.layers) ? data.layers : []) {
-      const id = String(raw?.id ?? '');
-      if (!id || layers.some((l) => l.id === id)) continue;
-      layers.push({
-        id,
-        name: String(raw.name ?? 'Layer').slice(0, 40) || 'Layer',
-        opacity: Number.isFinite(raw.opacity) ? Math.min(1, Math.max(0, raw.opacity)) : 1,
-        visible: raw.visible !== false,
-      });
-    }
-    if (layers.length === 0) layers.push(newLayer('Layer 1'));
-    const known = new Set(layers.map((l) => l.id));
-    const fallback = layers[0].id;
-
-    // Versions 1 and 2 predate animation: their whole board is frame one.
-    const frames: Frame[] = [];
-    for (const raw of Array.isArray(data.frames) ? data.frames : []) {
-      const id = String(raw?.id ?? '');
-      if (id && !frames.some((f) => f.id === id)) frames.push({ id });
-    }
-    if (frames.length === 0) frames.push(newFrame());
-    const knownFrames = new Set(frames.map((f) => f.id));
-    const frameFallback = frames[0].id;
-
-    let seq = 0;
-    const strokes: Stroke[] = [];
-    for (const raw of data.strokes) {
-      const points = (raw.points as [number, number, number][]).map(([x, y, p]) => ({ x, y, p }));
-      if (points.length === 0) continue;
-      const size = Number(raw.size) || 6;
-      const bbox = emptyBBox();
-      for (const pt of points) growBBox(bbox, pt.x, pt.y, size / 2 + 1);
-      const layer = String(raw.layer ?? '');
-      const frame = String(raw.frame ?? '');
-      const stroke: Stroke = {
-        id: String(raw.id ?? Math.random().toString(36).slice(2)),
-        // Files written before pictures existed have no ordering to preserve,
-        // so array order becomes the order.
-        seq: Number.isFinite(raw.seq) ? Number(raw.seq) : seq++,
-        color: String(raw.color ?? '#e8eaed'),
-        size,
-        pen: Boolean(raw.pen),
-        brush: isBrush(raw.brush) ? (raw.brush as BrushId) : 'pen', // pre-brush files are all pen
-        seed: Number.isFinite(raw.seed) ? raw.seed >>> 0 : hashSeed(String(raw.id ?? '')),
-        layer: known.has(layer) ? layer : fallback,
-        frame: knownFrames.has(frame) ? frame : frameFallback,
-        points,
-        bbox,
-      };
-      stroke.path = buildPath(stroke);
-      strokes.push(stroke);
-    }
-    const images: BoardImage[] = [];
-    for (const raw of Array.isArray(data.images) ? data.images : []) {
-      const src = String(raw?.src ?? '');
-      if (!src.startsWith('data:image/')) continue;
-      const layer = String(raw.layer ?? '');
-      const frame = String(raw.frame ?? '');
-      const image: BoardImage = {
-        id: String(raw.id ?? uid()),
-        seq: Number.isFinite(raw.seq) ? Number(raw.seq) : seq++,
-        src,
-        x: Number(raw.x) || 0,
-        y: Number(raw.y) || 0,
-        width: Math.max(1, Number(raw.width) || 1),
-        height: Math.max(1, Number(raw.height) || 1),
-        layer: known.has(layer) ? layer : fallback,
-        frame: knownFrames.has(frame) ? frame : frameFallback,
-      };
-      this.hydrate(image);
-      images.push(image);
-    }
-
-    this.strokes = strokes;
-    this.images = images;
-    this.nextSeq = Math.max(seq, ...strokes.map((s) => s.seq + 1), ...images.map((im) => im.seq + 1), 0);
-    this.layers = layers;
-    this.activeLayer = known.has(String(data.activeLayer)) ? String(data.activeLayer) : layers[layers.length - 1].id;
-    this.frames = frames;
-    this.activeFrame = knownFrames.has(String(data.activeFrame)) ? String(data.activeFrame) : frames[0].id;
-    this.fps = Number.isFinite(data.fps)
-      ? Math.round(Math.min(MAX_FPS, Math.max(MIN_FPS, data.fps)))
-      : 12;
-    this.onion = { ...defaultOnion(), ...(data.onion && typeof data.onion === 'object' ? data.onion : {}) };
+  // Replaces the board's contents. Returns the saved camera, if any.
+  load(snap: BoardSnapshot): Camera | null {
+    this.all = new Map();
+    for (const s of snap.strokes) this.all.set(s.id, s);
+    this.images = snap.images;
+    for (const image of this.images) this.hydrate(image);
+    this.nextSeq = snap.nextSeq;
+    this.layers = snap.layers;
+    this.activeLayer = snap.activeLayer;
+    this.frames = snap.frames;
+    this.activeFrame = snap.activeFrame;
+    this.fps = snap.fps;
+    this.onion = snap.onion;
     this.undoStack.length = 0;
     this.redoStack.length = 0;
+    this.reindex();
     this.changed();
-    const c = data.camera;
-    if (c && Number.isFinite(c.x) && Number.isFinite(c.y) && Number.isFinite(c.scale) && c.scale > 0) {
-      return {
-        x: c.x,
-        y: c.y,
-        scale: c.scale,
-        rotation: Number.isFinite(c.rotation) ? c.rotation : 0,
-      };
-    }
-    return null;
+    return snap.camera;
+  }
+
+  // Replaces board contents from JSON text. Returns the saved camera, if any.
+  // Throws on bad input.
+  deserialize(json: string): Camera | null {
+    return this.load(parseBoardJSON(json));
   }
 }

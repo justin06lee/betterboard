@@ -28,10 +28,21 @@ interface AiAsk {
 
 interface BetterboardAPI {
   platform: string;
-  autosave(json: string): Promise<void>;
-  loadAutosave(): Promise<string | null>;
-  saveBoard(json: string): Promise<boolean>;
-  openBoard(): Promise<string | null>;
+  bench?: boolean;
+  storeLoad(): Promise<{ manifest: string | null; legacy: boolean }>;
+  storeRead(name: string): Promise<Uint8Array>;
+  storeReadText(name: string): Promise<string>;
+  storePut(name: string, data: Uint8Array | string): Promise<void>;
+  storeCommit(manifest: unknown): Promise<void>;
+  storeQuarantine(): Promise<void>;
+  fileReadBegin(kind: 'open' | 'legacy-autosave'): Promise<{ token: number; size: number; name: string } | null>;
+  fileRead(token: number, max: number): Promise<Uint8Array | null>;
+  fileReadEnd(token: number): Promise<void>;
+  fileWriteBegin(): Promise<number | null>;
+  fileWrite(token: number, text: string): Promise<void>;
+  fileWriteEnd(token: number, ok: boolean): Promise<boolean>;
+  onFlush(cb: () => void): void;
+  flushed(): void;
   openImages(): Promise<string[]>;
   clipboardImage(): Promise<string | null>;
   clipboardText(): Promise<string>;
