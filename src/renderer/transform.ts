@@ -1,7 +1,6 @@
-import { buildPath } from './ink';
+import { strokeBBox } from './points';
 import type { Rect } from './store';
 import type { BBox, Point, Stroke } from './types';
-import { emptyBBox, growBBox } from './types';
 
 // A selection's box, the grips on it, and what dragging one does to whatever
 // the box holds. Kept apart from the renderer so the arithmetic can be tested
@@ -109,17 +108,30 @@ export function transformRect(r: Rect, from: Rect, to: Rect): Rect {
 // the rule vector editors use — which is exact for an even scale and splits a
 // stretch between its axes instead of letting one decide. The line is then
 // drawn again along its new path, so a stretched stroke is still a clean
-// stroke rather than a smeared one. Everything that makes it this stroke (id,
-// seq, seed, brush) is kept, so a selection holding it still holds it.
+// stroke rather than a smeared one — lazily, the first time it is painted.
+// Everything that makes it this stroke (id, seq, seed, brush) is kept, so a
+// selection holding it still holds it.
 export function transformStroke(s: Stroke, from: Rect, to: Rect): Stroke {
   const m = boxAffine(from, to);
   const size = s.size * Math.sqrt(m.sx * m.sy);
-  const points = s.points.map((pt) => ({ x: pt.x * m.sx + m.dx, y: pt.y * m.sy + m.dy, p: pt.p }));
-  // The same margin a freshly drawn stroke gets.
-  const bbox = emptyBBox();
-  for (const pt of points) growBBox(bbox, pt.x, pt.y, size + 2);
-  const out: Stroke = { ...s, size, points, bbox };
-  out.path = buildPath(out);
+  // Points are relative to the stroke's origin, so the origin takes the whole
+  // map and the points only its scale.
+  const pts = new Float32Array(s.n * 3);
+  for (let j = 0, end = s.n * 3; j < end; j += 3) {
+    pts[j] = s.pts[j] * m.sx;
+    pts[j + 1] = s.pts[j + 1] * m.sy;
+    pts[j + 2] = s.pts[j + 2];
+  }
+  const out: Stroke = {
+    ...s,
+    size,
+    ox: s.ox * m.sx + m.dx,
+    oy: s.oy * m.sy + m.dy,
+    pts,
+    path: undefined,
+    mark: undefined,
+  };
+  out.bbox = strokeBBox(out);
   return out;
 }
 

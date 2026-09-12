@@ -2,10 +2,27 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('betterboard', {
   platform: process.platform,
-  autosave: (json) => ipcRenderer.invoke('board:autosave', json),
-  loadAutosave: () => ipcRenderer.invoke('board:load-autosave'),
-  saveBoard: (json) => ipcRenderer.invoke('board:save', json),
-  openBoard: () => ipcRenderer.invoke('board:open'),
+  // Set by performance runs (BETTERBOARD_BENCH=1) so a driver can reach the
+  // board's internals; off for everyone else.
+  bench: process.env.BETTERBOARD_BENCH === '1',
+  // The autosave: a folder of bucket files and a manifest the main process
+  // keeps. See src/renderer/persist.ts.
+  storeLoad: () => ipcRenderer.invoke('store:load'),
+  storeRead: (name) => ipcRenderer.invoke('store:read', name),
+  storeReadText: (name) => ipcRenderer.invoke('store:read-text', name),
+  storePut: (name, data) => ipcRenderer.invoke('store:put', name, data),
+  storeCommit: (manifest) => ipcRenderer.invoke('store:commit', manifest),
+  storeQuarantine: () => ipcRenderer.invoke('store:quarantine'),
+  // Board files go back and forth in pieces, so no board is ever one string.
+  fileReadBegin: (kind) => ipcRenderer.invoke('file:read-begin', kind),
+  fileRead: (token, max) => ipcRenderer.invoke('file:read', token, max),
+  fileReadEnd: (token) => ipcRenderer.invoke('file:read-end', token),
+  fileWriteBegin: () => ipcRenderer.invoke('file:write-begin'),
+  fileWrite: (token, text) => ipcRenderer.invoke('file:write', token, text),
+  fileWriteEnd: (token, ok) => ipcRenderer.invoke('file:write-end', token, ok),
+  // The window asks for a last save before it closes.
+  onFlush: (cb) => ipcRenderer.on('app:flush', () => cb()),
+  flushed: () => ipcRenderer.send('app:flushed'),
   openImages: () => ipcRenderer.invoke('image:open'),
   clipboardImage: () => ipcRenderer.invoke('clipboard:image'),
   clipboardText: () => ipcRenderer.invoke('clipboard:text'),

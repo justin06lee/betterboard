@@ -86,6 +86,10 @@ export function isBrush(v: unknown): v is BrushId {
 // Strokes and images share one running sequence number per board, so within a
 // layer they can be painted back in the order they were actually made rather
 // than all the ink always landing on top of all the pictures.
+//
+// A committed stroke is never written to again: moving, reshaping or erasing
+// one swaps in a new object. That is what lets everything holding one — its
+// cached outline, the tiles it was painted into, a save in flight — trust it.
 export interface Stroke {
   id: string;
   seq: number;
@@ -98,9 +102,15 @@ export interface Stroke {
   seed: number;
   layer: string; // id of the owning layer
   frame: string; // id of the owning frame
-  points: StrokePoint[];
-  bbox: BBox;
-  path?: Path2D; // cached outline, world coordinates
+  // The centerline, packed: (x - ox, y - oy, pressure) for each of n points.
+  // See points.ts. A stroke still being drawn keeps spare room past n.
+  ox: number;
+  oy: number;
+  pts: Float32Array;
+  n: number;
+  bbox: BBox; // everything the ink can reach, not just the centerline
+  path?: Path2D; // cached outline, in the stroke's own coordinates
+  mark?: number; // scratch for spatial queries; see spatial.ts
 }
 
 // A placed picture: pasted, dropped, or inserted from a file. Axis-aligned in

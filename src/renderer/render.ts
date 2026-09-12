@@ -1,7 +1,11 @@
-import type { BBox, BoardImage, Camera, Layer, Point, Stroke, Theme } from './types';
-import { BRUSHES, bboxIntersects, emptyBBox, growBBox, imageBBox, toScreen, toWorld } from './types';
+import { pathOf } from './ink';
+import { inkReach } from './points';
+import type { BBox, BoardImage, BrushId, Camera, Layer, Point, Stroke, Theme } from './types';
+import { BRUSHES, emptyBBox, growBBox, toScreen, toWorld } from './types';
 
 export type Matrix = [number, number, number, number, number, number];
+
+export type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 // World -> canvas pixels for a camera, at `ratio` canvas pixels per css pixel,
 // with the css point (ox, oy) landing on the canvas origin. The same map as
@@ -24,12 +28,9 @@ export function worldMatrix(camera: Camera, ratio: number, ox = 0, oy = 0): Matr
 
 // The lasso being drawn, or a committed selection being dragged. `poly` is in
 // world coordinates. The in-progress move or resize is the world -> world map
-// (x·sx + dx, y·sy + dy), applied to the outline, the grips, and whatever
-// strokes and pictures `ids` and `imageIds` list.
+// (x·sx + dx, y·sy + dy), applied to the outline and the grips.
 export interface Marquee {
   poly: Point[];
-  ids: Set<string> | null;
-  imageIds?: Set<string> | null;
   // Where the resize grips go, corners first. Given explicitly rather than
   // derived from `poly`, which is the selection outline and may be a freehand
   // lasso with dozens of vertices — one grip per vertex is not what anyone wants.
@@ -44,171 +45,131 @@ export interface Marquee {
   dashOffset: number;
 }
 
-// One ghosted frame: its strokes, how strongly to paint them, and the colour
-// to flatten them to (null keeps their own ink).
-export interface Ghost {
-  strokes: Stroke[];
-  images: BoardImage[];
-  alpha: number;
-  tint: string | null;
-}
-
-export interface RenderOpts {
-  theme: Theme;
-  grid: boolean;
-  live: Stroke | null;
-  eraser: { x: number; y: number; radius: number } | null; // screen coords
-  marquee: Marquee | null;
-  layers: Layer[];
-  activeLayer: string;
-  images: BoardImage[];
-  ghosts: Ghost[];
-  // The region being asked about, as a world-space quad so it stays pinned to
-  // the drawing through pan, zoom and rotation.
-  region: Point[] | null;
-  // The magic-wand selection: a tinted mask canvas stretched over its picture's
-  // world rectangle, so it stays glued to the pixels it selects.
-  wand: { x: number; y: number; width: number; height: number; canvas: HTMLCanvasElement } | null;
-}
-
 const REGION_COLOR = '#a78bfa';
-
 const GRID_BASE = 40; // world units between dots at scale 1
+export const HANDLE = 9; // css px
 
-interface Bucket {
-  strokes: Stroke[];
-  images: BoardImage[];
-}
+// ---- strokes and pictures -------------------------------------------------
 
-function bucketByLayer(strokes: Stroke[], images: BoardImage[], layers: Layer[]): Map<string, Bucket> {
-  const buckets = new Map<string, Bucket>();
-  for (const l of layers) buckets.set(l.id, { strokes: [], images: [] });
-  for (const s of strokes) buckets.get(s.layer)?.strokes.push(s);
-  for (const im of images) buckets.get(im.layer)?.images.push(im);
-  return buckets;
-}
+// Level of detail. A stroke a pixel or two across looks the same drawn as a
+// speck or a line as it does as its full outline, and a board zoomed out far
+// enough to show a million strokes cannot afford a million outlines — so
+// small ink gets the cheap version, and never has its outline built at all.
+const SPECK_PX = 2; // ink this small across becomes a single soft speck
+const HAIRLINE_PX = 1.5; // ink this thin becomes a plain polyline
+// A pen's taper, a brush's gaps and chalk's grain all put down less than the
+// full width: the stand-ins are drawn to the width and coverage the real
+// stroke averages, so zooming across the threshold does not change the weight.
+const WIDTH: Record<BrushId, number> = { pen: 0.85, pixel: 1, marker: 1, paint: 0.9, chalk: 0.85, liner: 1 };
+const COVER: Record<BrushId, number> = { pen: 1, pixel: 1, marker: 1, paint: 0.75, chalk: 0.6, liner: 1 };
 
-// One reusable scratch canvas backs every translucent layer: a layer's opacity
-// has to composite the finished layer, not each stroke, or overlapping strokes
-// within it would show their seams.
-let scratch: HTMLCanvasElement | null = null;
-function scratchContext(width: number, height: number, transform: Matrix): CanvasRenderingContext2D {
-  if (!scratch) scratch = document.createElement('canvas');
-  if (scratch.width !== width || scratch.height !== height) {
-    scratch.width = width;
-    scratch.height = height;
-  }
-  const sctx = scratch.getContext('2d')!;
-  sctx.setTransform(1, 0, 0, 1, 0, 0);
-  sctx.clearRect(0, 0, width, height);
-  sctx.setTransform(...transform);
-  return sctx;
-}
-
-// Onion frames need one canvas for the flattened frame and another for a
-// translucent layer within that frame. Reusing the same canvas would clear the
-// layers that were already painted.
-let layerScratch: HTMLCanvasElement | null = null;
-function layerScratchContext(width: number, height: number, transform: Matrix): CanvasRenderingContext2D {
-  if (!layerScratch) layerScratch = document.createElement('canvas');
-  if (layerScratch.width !== width || layerScratch.height !== height) {
-    layerScratch.width = width;
-    layerScratch.height = height;
-  }
-  const sctx = layerScratch.getContext('2d')!;
-  sctx.setTransform(1, 0, 0, 1, 0, 0);
-  sctx.clearRect(0, 0, width, height);
-  sctx.setTransform(...transform);
-  return sctx;
-}
-
-// Exports paint at their own size, which has nothing to do with the window, so
-// they keep a third scratch canvas rather than fighting the two above for
-// dimensions. One canvas serves every frame of an animation.
-let exportScratch: HTMLCanvasElement | null = null;
-function exportScratchContext(width: number, height: number, transform: Matrix): CanvasRenderingContext2D {
-  if (!exportScratch) exportScratch = document.createElement('canvas');
-  if (exportScratch.width !== width || exportScratch.height !== height) {
-    exportScratch.width = width;
-    exportScratch.height = height;
-  }
-  const sctx = exportScratch.getContext('2d')!;
-  sctx.setTransform(1, 0, 0, 1, 0, 0);
-  sctx.clearRect(0, 0, width, height);
-  sctx.setTransform(...transform);
-  return sctx;
-}
-
-// Paints one layer's strokes into a context already carrying the world
-// transform. Strokes being dragged are lifted into a transformed pass so a move
-// (or a resize with too much ink to rebuild at pointer speed) costs one extra
-// transform rather than a rebuild — but they stay inside their own layer, so a
-// moving stroke never jumps above the layers over it.
-function paintLayer(
-  ctx: CanvasRenderingContext2D,
-  bucket: Bucket,
-  view: BBox,
-  m: Marquee | null,
-  moving: Set<string> | null,
-  live: Stroke | null,
-  movingImages: Set<string> | null = null
-): void {
-  const list = bucket.strokes;
-  const pics = bucket.images;
-  // Both lists are already in ascending seq (creation order), so one linear
-  // merge puts ink and pictures back in the order they were actually made.
-  let si = 0;
-  let ii = 0;
-  while (si < list.length || ii < pics.length) {
-    const takeStroke = ii >= pics.length || (si < list.length && list[si].seq <= pics[ii].seq);
-    if (takeStroke) {
-      const s = list[si++];
-      if (!s.path || (moving?.has(s.id) ?? false) || !bboxIntersects(s.bbox, view)) continue;
-      fillStroke(ctx, s);
-    } else {
-      const im = pics[ii++];
-      if ((movingImages?.has(im.id) ?? false) || !im.el || !bboxIntersects(imageBBox(im), view)) continue;
-      ctx.drawImage(im.el, im.x, im.y, im.width, im.height);
-    }
-  }
-  if (m && (moving || movingImages)) {
-    const sx = m.sx ?? 1;
-    const sy = m.sy ?? 1;
-    ctx.save();
-    ctx.transform(sx, 0, 0, sy, m.dx, m.dy);
-    for (const s of list) {
-      if (!s.path || !moving?.has(s.id)) continue;
-      const b = s.bbox;
-      const moved = { minX: b.minX * sx + m.dx, minY: b.minY * sy + m.dy, maxX: b.maxX * sx + m.dx, maxY: b.maxY * sy + m.dy };
-      if (!bboxIntersects(moved, view)) continue;
-      fillStroke(ctx, s);
-    }
-    for (const im of pics) {
-      if (!movingImages?.has(im.id) || !im.el) continue;
-      ctx.drawImage(im.el, im.x, im.y, im.width, im.height);
-    }
-    ctx.restore();
-  }
-  if (live?.path) fillStroke(ctx, live);
-}
-
-// Brushes carry their own opacity — a marker layers where it crosses itself in
-// a way a pen never should. globalAlpha is always put back so the caller's
-// compositing (layer opacity, onion ghosts) is unaffected.
-function fillStroke(ctx: CanvasRenderingContext2D, s: Stroke): void {
+// Paints one stroke under `m`, the world -> target pixel map, which scales by
+// `k` target pixels per world unit. `path` overrides the cached outline — the
+// stroke being drawn right now brings its own.
+export function drawStroke(ctx: Ctx, s: Stroke, m: Matrix, k: number, path?: Path2D): void {
+  const [a, b, c, d, e, f] = m;
   const alpha = BRUSHES[s.brush]?.alpha ?? 1;
+  if (!path) {
+    const box = s.bbox;
+    const inset = 2 * inkReach(s.brush, s.size) - s.size;
+    const extent = Math.max(box.maxX - box.minX, box.maxY - box.minY) - inset;
+    const width = s.size * (WIDTH[s.brush] ?? 1);
+    if (extent * k < SPECK_PX) {
+      const cx = (box.minX + box.maxX) / 2;
+      const cy = (box.minY + box.maxY) / 2;
+      const side = Math.max(extent * k, 0.5);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = alpha * (COVER[s.brush] ?? 1) * Math.min(1, Math.max(0.25, width / Math.max(extent, 1e-9)));
+      ctx.fillStyle = s.color;
+      ctx.fillRect(a * cx + c * cy + e - side / 2, b * cx + d * cy + f - side / 2, side, side);
+      ctx.globalAlpha = 1;
+      return;
+    }
+    if (width * k < HAIRLINE_PX) {
+      ctx.setTransform(a, b, c, d, a * s.ox + c * s.oy + e, b * s.ox + d * s.oy + f);
+      hairline(ctx, s, k);
+      ctx.lineWidth = width;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = s.color;
+      ctx.globalAlpha = alpha * (COVER[s.brush] ?? 1);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      return;
+    }
+  }
+  ctx.setTransform(a, b, c, d, a * s.ox + c * s.oy + e, b * s.ox + d * s.oy + f);
   ctx.fillStyle = s.color;
-  if (alpha >= 1) {
-    ctx.fill(s.path!);
+  if (alpha < 1) ctx.globalAlpha = alpha;
+  ctx.fill(path ?? pathOf(s));
+  if (alpha < 1) ctx.globalAlpha = 1;
+}
+
+// The centerline, skipping points closer than most of a pixel to the last one
+// kept — a line that thin cannot show the difference.
+function hairline(ctx: Ctx, s: Stroke, k: number): void {
+  const { pts, n } = s;
+  ctx.beginPath();
+  ctx.moveTo(pts[0], pts[1]);
+  if (n === 1) {
+    ctx.lineTo(pts[0] + 0.01, pts[1]);
     return;
   }
-  ctx.globalAlpha = alpha;
-  ctx.fill(s.path!);
-  ctx.globalAlpha = 1;
+  const minSq = (0.75 / k) ** 2;
+  let lx = pts[0];
+  let ly = pts[1];
+  const last = (n - 1) * 3;
+  for (let j = 3; j <= last; j += 3) {
+    const x = pts[j];
+    const y = pts[j + 1];
+    const dx = x - lx;
+    const dy = y - ly;
+    if (dx * dx + dy * dy < minSq && j < last) continue;
+    ctx.lineTo(x, y);
+    lx = x;
+    ly = y;
+  }
 }
 
-// Drawn under the world transform, so the dots rotate with the canvas.
-function drawGrid(ctx: CanvasRenderingContext2D, camera: Camera, view: BBox, color: string): void {
+export function drawImageItem(ctx: Ctx, im: BoardImage, m: Matrix): void {
+  if (!im.el) return;
+  ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
+  ctx.drawImage(im.el, im.x, im.y, im.width, im.height);
+}
+
+// Ink and pictures in one list, painted in the order they were made.
+export type Item = Stroke | BoardImage;
+
+export function isStroke(item: Item): item is Stroke {
+  return (item as Stroke).pts !== undefined;
+}
+
+export function bySeq(a: Item, b: Item): number {
+  return a.seq - b.seq;
+}
+
+// Paints items from `from` on, stopping early once `deadline` passes, and
+// returns where it stopped — so a tile too heavy for one frame can be painted
+// across several.
+export function paintItems(ctx: Ctx, items: readonly Item[], m: Matrix, k: number, from = 0, deadline = Infinity): number {
+  for (let i = from; i < items.length; i++) {
+    const item = items[i];
+    if (isStroke(item)) drawStroke(ctx, item, m, k);
+    else drawImageItem(ctx, item, m);
+    if ((i & 15) === 15 && performance.now() > deadline) return i + 1;
+  }
+  return items.length;
+}
+
+// ---- the dot grid ---------------------------------------------------------
+
+// The dots go down as one path, built for a stretch of board somewhat larger
+// than the view and rebuilt only once the view leaves it — so drawing over an
+// idle grid costs one fill, not thousands of little ones. The path is measured
+// from its own corner, like a stroke, so it stays exact far from the origin.
+let gridCache: { path: Path2D; spacing: number; r: number; box: BBox } | null = null;
+
+export function drawGrid(ctx: Ctx, camera: Camera, view: BBox, color: string, m: Matrix): void {
   // Pick the power-of-two multiple of the base spacing that lands in a
   // comfortable on-screen range, and fade dots in as they spread out.
   let spacing = GRID_BASE;
@@ -217,28 +178,58 @@ function drawGrid(ctx: CanvasRenderingContext2D, camera: Camera, view: BBox, col
   const screenSpacing = spacing * camera.scale;
   const alpha = Math.min(1, (screenSpacing - 10) / 18);
   if (alpha <= 0) return;
+  const r = Math.min(2, Math.max(1, screenSpacing / 24)) / camera.scale;
 
+  const g = gridCache;
+  const inside =
+    g && g.spacing === spacing && g.r === r &&
+    view.minX >= g.box.minX && view.maxX <= g.box.maxX && view.minY >= g.box.minY && view.maxY <= g.box.maxY;
+  if (!inside) {
+    const padX = (view.maxX - view.minX) * 0.25;
+    const padY = (view.maxY - view.minY) * 0.25;
+    const box = {
+      minX: Math.floor((view.minX - padX) / spacing) * spacing,
+      minY: Math.floor((view.minY - padY) / spacing) * spacing,
+      maxX: view.maxX + padX,
+      maxY: view.maxY + padY,
+    };
+    const path = new Path2D();
+    for (let wx = box.minX; wx <= box.maxX; wx += spacing) {
+      for (let wy = box.minY; wy <= box.maxY; wy += spacing) {
+        path.rect(wx - box.minX - r / 2, wy - box.minY - r / 2, r, r);
+      }
+    }
+    gridCache = { path, spacing, r, box };
+  }
+  const { path, box } = gridCache!;
+  const [a, b, c, d, e, f] = m;
+  ctx.setTransform(a, b, c, d, a * box.minX + c * box.minY + e, b * box.minX + d * box.minY + f);
   ctx.globalAlpha = alpha * 0.8;
   ctx.fillStyle = color;
-  const r = Math.min(2, Math.max(1, screenSpacing / 24)) / camera.scale;
-  const startX = Math.floor(view.minX / spacing) * spacing;
-  const startY = Math.floor(view.minY / spacing) * spacing;
-  for (let wx = startX; wx <= view.maxX; wx += spacing) {
-    for (let wy = startY; wy <= view.maxY; wy += spacing) {
-      ctx.fillRect(wx - r / 2, wy - r / 2, r, r);
-    }
-  }
+  ctx.fill(path);
   ctx.globalAlpha = 1;
 }
 
+// World-space AABB of the (possibly rotated) viewport.
+export function viewBBox(camera: Camera, width: number, height: number): BBox {
+  const view = emptyBBox();
+  for (const [sx, sy] of [
+    [0, 0],
+    [width, 0],
+    [0, height],
+    [width, height],
+  ]) {
+    const w = toWorld(camera, sx, sy);
+    growBBox(view, w.x, w.y, 0);
+  }
+  return view;
+}
+
+// ---- overlays ---------------------------------------------------------------
+
 // Drawn in screen space: the dashes keep the same on-screen size at any zoom,
 // and the marching-ants offset reads the same whichever way the canvas is turned.
-function drawMarquee(
-  ctx: CanvasRenderingContext2D,
-  camera: Camera,
-  m: Marquee,
-  theme: Theme
-): void {
+function drawMarquee(ctx: CanvasRenderingContext2D, camera: Camera, m: Marquee, theme: Theme): void {
   if (m.poly.length < 2) return;
   const sx = m.sx ?? 1;
   const sy = m.sy ?? 1;
@@ -296,112 +287,21 @@ function drawMarquee(
   }
 }
 
-export const HANDLE = 9; // css px
+export interface Overlays {
+  theme: Theme;
+  marquee: Marquee | null;
+  eraser: { x: number; y: number; radius: number } | null; // screen coords
+  // The region being asked about, as a world-space quad so it stays pinned to
+  // the drawing through pan, zoom and rotation.
+  region: Point[] | null;
+}
 
-export function render(
-  ctx: CanvasRenderingContext2D,
-  canvas: HTMLCanvasElement,
-  camera: Camera,
-  strokes: Stroke[],
-  opts: RenderOpts
-): void {
-  const dpr = window.devicePixelRatio || 1;
-  const width = canvas.width / dpr;
-  const height = canvas.height / dpr;
-
+export function drawOverlays(ctx: CanvasRenderingContext2D, camera: Camera, dpr: number, o: Overlays): void {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = opts.theme.bg;
-  ctx.fillRect(0, 0, width, height);
-
-  // World-space AABB of the (possibly rotated) viewport, for culling and grid.
-  const view = emptyBBox();
-  for (const [sx, sy] of [
-    [0, 0],
-    [width, 0],
-    [0, height],
-    [width, height],
-  ]) {
-    const w = toWorld(camera, sx, sy);
-    growBBox(view, w.x, w.y, 0);
-  }
-
-  // World-space pass: one transform, cached Path2D per stroke.
-  const world = worldMatrix(camera, dpr);
-  ctx.setTransform(...world);
-  if (opts.grid) drawGrid(ctx, camera, view, opts.theme.grid);
-
-  // Onion skins sit under the live frame. Each ghost frame is flattened through
-  // the scratch canvas and composited once, so a ghost reads as one translucent
-  // drawing rather than a pile of overlapping translucent strokes.
-  for (const ghost of opts.ghosts) {
-    if (ghost.strokes.length === 0 && ghost.images.length === 0) continue;
-    const gctx = scratchContext(canvas.width, canvas.height, world);
-    const ghostBuckets = bucketByLayer(ghost.strokes, ghost.images, opts.layers);
-    for (const layer of opts.layers) {
-      if (!layer.visible || layer.opacity === 0) continue;
-      const bucket = ghostBuckets.get(layer.id)!;
-      if (bucket.strokes.length === 0 && bucket.images.length === 0) continue;
-      if (layer.opacity >= 1) {
-        paintLayer(gctx, bucket, view, null, null, null);
-        continue;
-      }
-      const lctx = layerScratchContext(canvas.width, canvas.height, world);
-      paintLayer(lctx, bucket, view, null, null, null);
-      gctx.save();
-      gctx.setTransform(1, 0, 0, 1, 0, 0);
-      gctx.globalAlpha = layer.opacity;
-      gctx.drawImage(layerScratch!, 0, 0);
-      gctx.restore();
-    }
-    if (ghost.tint) {
-      // Colour the fully composited frame in one pass, including pictures. The
-      // source-in operation keeps transparency while replacing visible pixels.
-      gctx.save();
-      gctx.setTransform(1, 0, 0, 1, 0, 0);
-      gctx.globalCompositeOperation = 'source-in';
-      gctx.fillStyle = ghost.tint;
-      gctx.fillRect(0, 0, canvas.width, canvas.height);
-      gctx.restore();
-    }
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalAlpha = ghost.alpha;
-    ctx.drawImage(scratch!, 0, 0);
-    ctx.restore();
-  }
-
-  const m = opts.marquee;
-  const lifted = m !== null && (m.dx !== 0 || m.dy !== 0 || (m.sx ?? 1) !== 1 || (m.sy ?? 1) !== 1);
-  const moving = lifted && m?.ids ? m.ids : null;
-  const movingImages = lifted && m?.imageIds ? m.imageIds : null;
-  const buckets = bucketByLayer(strokes, opts.images, opts.layers);
-  for (const layer of opts.layers) {
-    if (!layer.visible || layer.opacity === 0) continue;
-    const list = buckets.get(layer.id)!;
-    const live = layer.id === opts.activeLayer ? opts.live : null;
-    if (list.strokes.length === 0 && list.images.length === 0 && !live) continue;
-    if (layer.opacity >= 1) {
-      paintLayer(ctx, list, view, m, moving, live, movingImages);
-      continue;
-    }
-    paintLayer(scratchContext(canvas.width, canvas.height, world), list, view, m, moving, live, movingImages);
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalAlpha = layer.opacity;
-    ctx.drawImage(scratch!, 0, 0);
-    ctx.restore();
-  }
-
-  if (opts.wand) {
-    ctx.setTransform(...world);
-    ctx.drawImage(opts.wand.canvas, opts.wand.x, opts.wand.y, opts.wand.width, opts.wand.height);
-  }
-
-  // Screen-space overlay.
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (opts.region && opts.region.length > 1) {
+  ctx.globalAlpha = 1;
+  if (o.region && o.region.length > 1) {
     ctx.beginPath();
-    opts.region.forEach((p, i) => {
+    o.region.forEach((p, i) => {
       const s = toScreen(camera, p.x, p.y);
       if (i === 0) ctx.moveTo(s.x, s.y);
       else ctx.lineTo(s.x, s.y);
@@ -417,16 +317,79 @@ export function render(
     ctx.stroke();
     ctx.setLineDash([]);
   }
-  if (opts.marquee) drawMarquee(ctx, camera, opts.marquee, opts.theme);
-  if (opts.eraser) {
+  if (o.marquee) drawMarquee(ctx, camera, o.marquee, o.theme);
+  if (o.eraser) {
     ctx.beginPath();
-    ctx.arc(opts.eraser.x, opts.eraser.y, opts.eraser.radius, 0, Math.PI * 2);
-    ctx.strokeStyle = opts.theme.ink;
+    ctx.arc(o.eraser.x, o.eraser.y, o.eraser.radius, 0, Math.PI * 2);
+    ctx.strokeStyle = o.theme.ink;
     ctx.globalAlpha = 0.6;
     ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
+}
+
+// ---- exports ----------------------------------------------------------------
+
+// One layer's ink and pictures inside `view`, in the order they were made.
+function layerItems(strokes: readonly Stroke[], images: readonly BoardImage[], layer: string, view: BBox | null): Item[] {
+  const items: Item[] = [];
+  for (const s of strokes) {
+    if (s.layer !== layer) continue;
+    if (view && (s.bbox.minX > view.maxX || s.bbox.maxX < view.minX || s.bbox.minY > view.maxY || s.bbox.maxY < view.minY)) continue;
+    items.push(s);
+  }
+  for (const im of images) {
+    if (im.layer !== layer) continue;
+    if (view && (im.x > view.maxX || im.x + im.width < view.minX || im.y > view.maxY || im.y + im.height < view.minY)) continue;
+    items.push(im);
+  }
+  return items.sort(bySeq);
+}
+
+// Paints the visible layers of a set of strokes and pictures into `ctx`, which
+// has nothing on it yet but a background. A translucent layer is flattened in
+// `scratch` first and composited once, so overlaps inside it never show seams.
+function paintLayers(
+  ctx: Ctx,
+  strokes: readonly Stroke[],
+  images: readonly BoardImage[],
+  layers: Layer[],
+  m: Matrix,
+  k: number,
+  view: BBox | null,
+  scratch: () => Ctx
+): void {
+  for (const layer of layers) {
+    if (!layer.visible || layer.opacity === 0) continue;
+    const items = layerItems(strokes, images, layer.id, view);
+    if (items.length === 0) continue;
+    if (layer.opacity >= 1) {
+      paintItems(ctx, items, m, k);
+      continue;
+    }
+    const s = scratch();
+    s.setTransform(1, 0, 0, 1, 0, 0);
+    s.clearRect(0, 0, s.canvas.width, s.canvas.height);
+    paintItems(s, items, m, k);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = layer.opacity;
+    ctx.drawImage(s.canvas, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// Exports paint at their own size, which has nothing to do with the window, so
+// they keep a scratch canvas of their own. One serves every frame of an
+// animation.
+let exportScratch: HTMLCanvasElement | null = null;
+function exportScratchContext(width: number, height: number): Ctx {
+  if (!exportScratch) exportScratch = document.createElement('canvas');
+  if (exportScratch.width !== width || exportScratch.height !== height) {
+    exportScratch.width = width;
+    exportScratch.height = height;
+  }
+  return exportScratch.getContext('2d')!;
 }
 
 // Captures one on-screen rectangle as a standalone image, at the camera's
@@ -453,7 +416,6 @@ export function renderRegion(
   // Same world transform the board uses, shifted so the rectangle's top-left
   // corner becomes the image origin.
   const world = worldMatrix(camera, scale, rect.x, rect.y);
-
   const view = emptyBBox();
   for (const [sx, sy] of [
     [rect.x, rect.y],
@@ -464,29 +426,15 @@ export function renderRegion(
     const w = toWorld(camera, sx, sy);
     growBBox(view, w.x, w.y, 0);
   }
-
-  const buckets = bucketByLayer(strokes, images, layers);
-  ctx.setTransform(...world);
-  for (const layer of layers) {
-    if (!layer.visible || layer.opacity === 0) continue;
-    const list = buckets.get(layer.id)!;
-    if (list.strokes.length === 0 && list.images.length === 0) continue;
-    if (layer.opacity >= 1) {
-      paintLayer(ctx, list, view, null, null, null);
-      continue;
+  let tmp: HTMLCanvasElement | null = null;
+  paintLayers(ctx, strokes, images, layers, world, scale * camera.scale, view, () => {
+    if (!tmp) {
+      tmp = document.createElement('canvas');
+      tmp.width = canvas.width;
+      tmp.height = canvas.height;
     }
-    const tmp = document.createElement('canvas');
-    tmp.width = canvas.width;
-    tmp.height = canvas.height;
-    const tctx = tmp.getContext('2d')!;
-    tctx.setTransform(...world);
-    paintLayer(tctx, list, view, null, null, null);
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalAlpha = layer.opacity;
-    ctx.drawImage(tmp, 0, 0);
-    ctx.restore();
-  }
+    return tmp.getContext('2d')!;
+  });
   return canvas;
 }
 
@@ -545,26 +493,9 @@ export function paintExport(
     ctx.fillStyle = background;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
-
-  const everything: BBox = { minX: -Infinity, minY: -Infinity, maxX: Infinity, maxY: Infinity };
-  const buckets = bucketByLayer(strokes, images, layers);
-  ctx.setTransform(...layout.transform);
-  for (const layer of layers) {
-    if (!layer.visible || layer.opacity === 0) continue;
-    const list = buckets.get(layer.id)!;
-    if (list.strokes.length === 0 && list.images.length === 0) continue;
-    if (layer.opacity >= 1) {
-      paintLayer(ctx, list, everything, null, null, null);
-      continue;
-    }
-    const tctx = exportScratchContext(canvas.width, canvas.height, layout.transform);
-    paintLayer(tctx, list, everything, null, null, null);
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalAlpha = layer.opacity;
-    ctx.drawImage(tctx.canvas, 0, 0);
-    ctx.restore();
-  }
+  paintLayers(ctx, strokes, images, layers, layout.transform, layout.transform[0], null, () =>
+    exportScratchContext(canvas.width, canvas.height)
+  );
 }
 
 // Renders the visible layers into an offscreen canvas sized to fit the content.

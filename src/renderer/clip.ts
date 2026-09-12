@@ -1,19 +1,27 @@
 // A clip is a selection lifted off the board: the ink and pictures inside it,
-// moved so the whole thing starts at (0, 0), with nothing in it that cannot be
-// written to JSON. That one shape serves three features — copy/paste,
-// duplicate, and stickers — because all three are the same question asked at
-// different times: what was selected, and where should it come back?
+// moved so the whole thing starts at (0, 0). That one shape serves three
+// features — copy/paste, duplicate, and stickers — because all three are the
+// same question asked at different times: what was selected, and where should
+// it come back?
 
+import { packedBBox, packPoints, unpackPoints } from './points';
 import type { BBox, BoardImage, BrushId, Point, Stroke, StrokePoint } from './types';
-import { emptyBBox, growBBox, uid } from './types';
+import { emptyBBox, growBBox, isBrush, uid } from './types';
 
+// Packed like a board stroke, with its origin measured from the clip's
+// corner. The points are the very array of the stroke it was cut from rather
+// than a copy — committed points never change — so lifting even a huge
+// selection costs one small object per stroke.
 export interface ClipStroke {
   color: string;
   size: number;
   pen: boolean;
   brush: BrushId;
   seed: number;
-  points: StrokePoint[];
+  ox: number;
+  oy: number;
+  pts: Float32Array;
+  n: number;
 }
 
 export interface ClipImage {
@@ -57,10 +65,10 @@ export function makeClip(strokes: Stroke[], images: BoardImage[]): Clip | null {
 
   // One merged pass in creation order, so `order` records how the two lists
   // interleave and paste can hand out sequence numbers to match.
-  const merged = [
-    ...strokes.map((s) => ({ seq: s.seq, stroke: s, image: null as BoardImage | null })),
-    ...images.map((im) => ({ seq: im.seq, stroke: null as Stroke | null, image: im })),
-  ].sort((a, b) => a.seq - b.seq);
+  const merged: { seq: number; stroke: Stroke | null; image: BoardImage | null }[] = [];
+  for (const s of strokes) merged.push({ seq: s.seq, stroke: s, image: null });
+  for (const im of images) merged.push({ seq: im.seq, stroke: null, image: im });
+  merged.sort((a, b) => a.seq - b.seq);
 
   const clip: Clip = {
     strokes: [],
@@ -78,7 +86,10 @@ export function makeClip(strokes: Stroke[], images: BoardImage[]): Clip | null {
         pen: s.pen,
         brush: s.brush,
         seed: s.seed,
-        points: s.points.map((p) => ({ x: p.x - ox, y: p.y - oy, p: p.p })),
+        ox: s.ox - ox,
+        oy: s.oy - oy,
+        pts: s.pts.length === s.n * 3 ? s.pts : s.pts.slice(0, s.n * 3),
+        n: s.n,
       });
       clip.order.push('stroke');
     } else {
@@ -104,9 +115,8 @@ export interface PlaceOpts {
 }
 
 // Rebuilds a clip's contents at `at` (its top-left corner) as fresh board
-// items. Paths are deliberately left unbuilt: Path2D is a browser object, and
-// leaving it to the caller keeps this side testable and the ink module in one
-// place.
+// items. Outlines are left for the renderer to build the first time each
+// stroke is painted.
 export function placeClip(clip: Clip, at: Point, opts: PlaceOpts): { strokes: Stroke[]; images: BoardImage[] } {
   const k = opts.scale ?? 1;
   const strokes: Stroke[] = [];
@@ -118,10 +128,17 @@ export function placeClip(clip: Clip, at: Point, opts: PlaceOpts): { strokes: St
     if (kind === 'stroke') {
       const src = clip.strokes[si++];
       if (!src) continue;
-      const points = src.points.map((p) => ({ x: at.x + p.x * k, y: at.y + p.y * k, p: p.p }));
+      let pts = src.pts;
+      if (k !== 1) {
+        pts = new Float32Array(src.n * 3);
+        for (let j = 0; j < src.n * 3; j += 3) {
+          pts[j] = src.pts[j] * k;
+          pts[j + 1] = src.pts[j + 1] * k;
+          pts[j + 2] = src.pts[j + 2];
+        }
+      }
+      const packed = { ox: at.x + src.ox * k, oy: at.y + src.oy * k, pts, n: src.n };
       const size = src.size * k;
-      const bbox = emptyBBox();
-      for (const p of points) growBBox(bbox, p.x, p.y, size / 2 + 2);
       strokes.push({
         id: uid(),
         seq,
@@ -132,8 +149,8 @@ export function placeClip(clip: Clip, at: Point, opts: PlaceOpts): { strokes: St
         seed: src.seed,
         layer: opts.layer,
         frame: opts.frame,
-        points,
-        bbox,
+        ...packed,
+        bbox: packedBBox(packed, src.brush, size),
       });
     } else {
       const src = clip.images[ii++];
@@ -154,8 +171,63 @@ export function placeClip(clip: Clip, at: Point, opts: PlaceOpts): { strokes: St
   return { strokes, images };
 }
 
-export function isClip(value: unknown): value is Clip {
-  const c = value as Clip | null;
+// ---- on disk --------------------------------------------------------------
+
+// What a clip looks like written down: plain points, the form stickers have
+// always been saved in, so a tray written by an older version still loads.
+export interface ClipJSON {
+  strokes: {
+    color: string;
+    size: number;
+    pen: boolean;
+    brush: BrushId;
+    seed: number;
+    points: StrokePoint[];
+  }[];
+  images: ClipImage[];
+  order: ('stroke' | 'image')[];
+  width: number;
+  height: number;
+}
+
+const round = (v: number, k: number) => Math.round(v * k) / k;
+
+export function clipToJSON(clip: Clip): ClipJSON {
+  return {
+    strokes: clip.strokes.map((s) => ({
+      color: s.color,
+      size: s.size,
+      pen: s.pen,
+      brush: s.brush,
+      seed: s.seed,
+      points: unpackPoints(s).map((p) => ({ x: round(p.x, 1e4), y: round(p.y, 1e4), p: round(p.p, 1e3) })),
+    })),
+    images: clip.images.map((im) => ({ ...im })),
+    order: [...clip.order],
+    width: clip.width,
+    height: clip.height,
+  };
+}
+
+export function clipFromJSON(json: ClipJSON): Clip {
+  return {
+    strokes: json.strokes.map((s) => ({
+      color: String(s.color),
+      size: Number(s.size) || 1,
+      pen: Boolean(s.pen),
+      brush: isBrush(s.brush) ? s.brush : 'pen',
+      seed: Number.isFinite(s.seed) ? s.seed >>> 0 : 0,
+      ...packPoints(Array.isArray(s.points) ? s.points : []),
+    })),
+    images: json.images.map((im) => ({ ...im })),
+    order: [...json.order],
+    width: json.width,
+    height: json.height,
+  };
+}
+
+export function isClip(value: unknown): value is ClipJSON {
+  const c = value as ClipJSON | null;
   return (
     !!c &&
     typeof c === 'object' &&
@@ -181,10 +253,18 @@ export interface Sticker {
   createdAt: number;
 }
 
+export interface StickerJSON {
+  id: string;
+  name: string;
+  thumb: string;
+  clip: ClipJSON;
+  createdAt: number;
+}
+
 export const MAX_STICKERS = 60;
 
-export function isSticker(value: unknown): value is Sticker {
-  const s = value as Sticker | null;
+export function isSticker(value: unknown): value is StickerJSON {
+  const s = value as StickerJSON | null;
   return (
     !!s &&
     typeof s === 'object' &&
@@ -195,9 +275,17 @@ export function isSticker(value: unknown): value is Sticker {
   );
 }
 
+export function stickerToJSON(s: Sticker): StickerJSON {
+  return { id: s.id, name: s.name, thumb: s.thumb, clip: clipToJSON(s.clip), createdAt: s.createdAt };
+}
+
+export function stickerFromJSON(s: StickerJSON): Sticker {
+  return { id: s.id, name: s.name, thumb: s.thumb, clip: clipFromJSON(s.clip), createdAt: Number(s.createdAt) || 0 };
+}
+
 // Names come from whatever was on the board, which is nothing, so they are
 // numbered — but never duplicated, because the tray is read at a glance.
-export function stickerName(existing: Sticker[], base = 'Sticker'): string {
+export function stickerName(existing: { name: string }[], base = 'Sticker'): string {
   const taken = new Set(existing.map((s) => s.name));
   for (let i = 1; ; i++) {
     const name = `${base} ${i}`;

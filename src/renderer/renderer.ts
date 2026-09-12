@@ -3,14 +3,18 @@ import { eraseStrokePoints } from './erase';
 import { backgroundSelect, dilate, floodSelect, maskBounds, maskTouchesBorder, similarSelect } from './pixels';
 import { drawingToLines } from './ai-drawing';
 import type { AiConnection, AiConnectionKind, AiConnectionState } from './global';
-import type { Ghost, Marquee } from './render';
+import type { Item, Marquee } from './render';
 import type { ImageSrcChange, Rect, StrokeReplacement } from './store';
 import type { AnimFormat, AnimSettings } from './animation';
 import { animationLayout, exportAnimation, gifDelayMs } from './animation';
-import { HANDLE, exportLayout, paintExport, render, renderExport, renderRegion } from './render';
+import { HANDLE, bySeq, drawStroke, exportLayout, paintExport, renderExport, renderRegion } from './render';
+import type { Ghost, Lift } from './tiles';
+import { Compositor, LIFT_DIRECT } from './tiles';
+import { Autosave, openBoardFile, saveBoardFile } from './persist';
+import { appendPoint, makeStroke, sealPoints, unpackPoints } from './points';
 import { Board } from './store';
 import type { Clip, Sticker } from './clip';
-import { MAX_STICKERS, isSticker, makeClip, placeClip, stickerName } from './clip';
+import { MAX_STICKERS, isSticker, makeClip, placeClip, stickerFromJSON, stickerName, stickerToJSON } from './clip';
 import type { Dock, DockSide } from './dock';
 import { createDock, isDockSide } from './dock';
 import type { GripMode } from './transform';
@@ -28,7 +32,7 @@ import {
 } from './transform';
 import type { HSV } from './color';
 import { hexToRgb, hsvToRgb, parseColor, pushRecent, rgbToHex, rgbToHsv } from './color';
-import type { BBox, BoardImage, BrushId, Camera, Point, Stroke } from './types';
+import type { BBox, BoardImage, BrushId, Camera, Point, Stroke, StrokePoint } from './types';
 import {
   BRUSHES,
   BRUSH_ORDER,
@@ -113,6 +117,10 @@ let clipMark: string | null = null;
 let stickers: Sticker[] = [];
 
 let live: Stroke | null = null;
+// Its outline, rebuilt at most once a frame however many pointer events
+// arrived since the last one.
+let livePath: Path2D | null = null;
+let liveDirty = false;
 let spaceHeld = false;
 let eraserCursor: { x: number; y: number } | null = null;
 const erasePending = new Set<string>();
@@ -193,6 +201,8 @@ let cssHeight = 0;
 
 const canvas = document.getElementById('board') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d', { desynchronized: true, alpha: false })!;
+// The board's painted tiles; see tiles.ts.
+const compositor = new Compositor(board);
 const $ = (id: string) => document.getElementById(id)!;
 // 'pen' is not here: the draw tool is represented by whichever brush button is
 // lit, so it is tracked separately.
@@ -295,35 +305,41 @@ function requestRender(): void {
   dirty = true;
   requestAnimationFrame(() => {
     dirty = false;
-    syncSelectionBar();
-    const reshape = drag?.kind === 'transform' ? drag : null;
-    if (reshape) refreshReshape(reshape);
-    const frame = board.activeFrame;
-    const strokes = board.strokes.flatMap((stroke) => {
-      if (stroke.frame !== frame || erasePending.has(stroke.id)) return [];
-      return areaEraseChanges.get(stroke.id)?.after ?? [reshape?.preview.get(stroke.id) ?? stroke];
-    });
-    render(ctx, canvas, camera, strokes, {
-      theme: THEMES[themeName],
-      grid,
-      live,
-      eraser:
-        (tool === 'eraser' || drag?.kind === 'erase') && eraserCursor
-          ? { x: eraserCursor.x, y: eraserCursor.y, radius: ERASER_RADIUS }
-          : null,
-      marquee: lasso
-        ? { poly: lasso, ids: null, dx: 0, dy: 0, dashOffset }
-        : selection
-          ? selectionMarquee(selection)
-          : null,
-      layers: board.layers,
-      activeLayer: board.activeLayer,
-      images: board.images.filter((im) => im.frame === frame),
-      ghosts: playing ? [] : ghostCache,
-      region: regionDrag ?? region?.quad ?? null,
-      wand: wandOverlay(frame),
-    });
+    drawFrame();
   });
+}
+
+// One frame. The board comes out of the tile cache, so only what is moving —
+// the live stroke, a dragged selection, the overlays — is drawn fresh, and a
+// frame costs the same on an empty board as on a full one.
+function drawFrame(): void {
+  syncSelectionBar();
+  const reshape = drag?.kind === 'transform' ? drag : null;
+  if (reshape) refreshReshape(reshape);
+  if (live && (liveDirty || !livePath)) {
+    livePath = buildPath(live, true);
+    liveDirty = false;
+  }
+  const frame = board.activeFrame;
+  compositor.draw(ctx, canvas, camera, {
+    theme: THEMES[themeName],
+    grid,
+    layers: board.layers,
+    activeLayer: board.activeLayer,
+    frame,
+    ghosts: playing ? [] : ghostCache,
+    live: live && livePath ? { stroke: live, path: livePath } : null,
+    lift: currentLift(),
+    eraser:
+      (tool === 'eraser' || drag?.kind === 'erase') && eraserCursor
+        ? { x: eraserCursor.x, y: eraserCursor.y, radius: ERASER_RADIUS }
+        : null,
+    marquee: lasso ? { poly: lasso, dx: 0, dy: 0, dashOffset } : selection ? selectionMarquee(selection) : null,
+    region: regionDrag ?? region?.quad ?? null,
+    wand: wandOverlay(frame),
+  });
+  // Tiles still to paint for this view: carry on next frame.
+  if (compositor.pending) requestRender();
 }
 
 function resizeCanvas(): void {
@@ -338,12 +354,11 @@ function resizeCanvas(): void {
 
 // ---- persistence ----------------------------------------------------------
 
-let autosaveTimer: number | undefined;
+// Writes only what changed since the last save — see persist.ts — so an edit
+// on a huge board costs about what it would on an empty one.
+const autosave = new Autosave(board, () => fileCamera());
 function scheduleAutosave(): void {
-  clearTimeout(autosaveTimer);
-  autosaveTimer = window.setTimeout(() => {
-    void window.betterboard.autosave(board.serialize(fileCamera()));
-  }, 800);
+  autosave.schedule();
 }
 
 const TOOLS: Tool[] = ['pen', 'eraser', 'fill', 'select', 'wand', 'picker', 'ask', 'hand'];
@@ -778,18 +793,17 @@ function addLivePoint(e: PointerEvent): boolean {
   if (!live) return false;
   const w = toWorld(camera, e.offsetX, e.offsetY);
   const p = pressureOf(e);
-  const last = live.points[live.points.length - 1];
-  if (last) {
-    const dx = (w.x - last.x) * camera.scale;
-    const dy = (w.y - last.y) * camera.scale;
+  if (live.n > 0) {
+    const j = (live.n - 1) * 3;
+    const dx = (w.x - (live.ox + live.pts[j])) * camera.scale;
+    const dy = (w.y - (live.oy + live.pts[j + 1])) * camera.scale;
     if (dx * dx + dy * dy < MIN_DIST * MIN_DIST) {
       // Keep pressure fresh even when the pen barely moves.
-      last.p = Math.max(last.p, p);
+      live.pts[j + 2] = Math.max(live.pts[j + 2], p);
       return false;
     }
   }
-  live.points.push({ x: w.x, y: w.y, p });
-  growBBox(live.bbox, w.x, w.y, live.size + 2);
+  appendPoint(live, w.x, w.y, p);
   return true;
 }
 
@@ -805,51 +819,49 @@ function startStroke(e: PointerEvent): void {
     seed: (Math.random() * 0xffffffff) >>> 0,
     layer: board.activeLayer,
     frame: board.activeFrame,
-    points: [{ x: w.x, y: w.y, p: pressureOf(e) }],
+    ox: w.x,
+    oy: w.y,
+    pts: new Float32Array(96),
+    n: 0,
     bbox: emptyBBox(),
   };
-  growBBox(live.bbox, w.x, w.y, live.size + 2);
-  live.path = buildPath(live, true);
+  appendPoint(live, w.x, w.y, pressureOf(e));
+  livePath = buildPath(live, true);
+  liveDirty = false;
   requestRender();
 }
 
+// The stroke joins the board and is painted straight onto its tiles; from
+// the next frame on it costs nothing to show.
 function finishStroke(): void {
   if (!live) return;
-  live.path = buildPath(live, false);
-  board.addStroke(live);
+  const done = live;
   live = null;
+  livePath = null;
+  sealPoints(done);
+  board.addStroke(done);
 }
 
 // Every edit is confined to the active cell of the frame x layer grid — that
 // is what layers are for, and it keeps a traced-over sketch safe underneath.
-function editable(s: Stroke): boolean {
-  return s.frame === board.activeFrame && s.layer === board.activeLayer;
+// The board's index answers for just the neighbourhood asked about.
+function editableNear(box: BBox): Stroke[] {
+  return board.query(board.activeFrame, board.activeLayer, box);
 }
 
 function eraseAt(e: PointerEvent): void {
   const w = toWorld(camera, e.offsetX, e.offsetY);
   const radius = ERASER_RADIUS / camera.scale;
-  for (const s of board.strokes) {
-    if (!editable(s)) continue;
-    if (!erasePending.has(s.id) && strokeHit(s, w.x, w.y, radius)) {
-      erasePending.add(s.id);
-    }
+  const near = { minX: w.x - radius, minY: w.y - radius, maxX: w.x + radius, maxY: w.y + radius };
+  for (const s of editableNear(near)) {
+    if (erasePending.has(s.id) || !strokeHit(s, w.x, w.y, radius)) continue;
+    erasePending.add(s.id);
+    compositor.invalidate(s.frame, s.layer, s.bbox);
   }
 }
 
-function fragmentStroke(stroke: Stroke, points: Stroke['points'][]): Stroke[] {
-  return points.map((fragment) => {
-    const next: Stroke = {
-      ...stroke,
-      id: uid(),
-      points: fragment,
-      bbox: emptyBBox(),
-      path: undefined,
-    };
-    for (const point of fragment) growBBox(next.bbox, point.x, point.y, next.size / 2 + 2);
-    next.path = buildPath(next);
-    return next;
-  });
+function fragmentStroke(stroke: Stroke, points: StrokePoint[][]): Stroke[] {
+  return points.map((fragment) => makeStroke({ ...stroke, id: uid() }, fragment));
 }
 
 function eraseAreaAt(e: PointerEvent): void {
@@ -857,20 +869,24 @@ function eraseAreaAt(e: PointerEvent): void {
   const path = areaEraseLast ? [areaEraseLast, point] : [point];
   const radius = ERASER_RADIUS / camera.scale;
   const eraserBox = {
-    minX: Math.min(...path.map((item) => item.x)) - radius,
-    minY: Math.min(...path.map((item) => item.y)) - radius,
-    maxX: Math.max(...path.map((item) => item.x)) + radius,
-    maxY: Math.max(...path.map((item) => item.y)) + radius,
+    minX: Math.min(point.x, areaEraseLast?.x ?? point.x) - radius,
+    minY: Math.min(point.y, areaEraseLast?.y ?? point.y) - radius,
+    maxX: Math.max(point.x, areaEraseLast?.x ?? point.x) + radius,
+    maxY: Math.max(point.y, areaEraseLast?.y ?? point.y) + radius,
   };
+  // What has to be repainted: the eraser's own sweep, and every stroke it cut.
+  const repaint = { ...eraserBox };
 
-  for (let index = 0; index < board.strokes.length; index++) {
-    const original = board.strokes[index];
-    if (!editable(original) || !bboxIntersects(original.bbox, eraserBox)) continue;
+  for (const original of editableNear(eraserBox)) {
     const previous = areaEraseChanges.get(original.id)?.after ?? [original];
     const after: Stroke[] = [];
     let changed = false;
     for (const fragment of previous) {
-      const result = eraseStrokePoints(fragment.points, path, radius + fragment.size / 2);
+      if (!bboxIntersects(fragment.bbox, eraserBox)) {
+        after.push(fragment);
+        continue;
+      }
+      const result = eraseStrokePoints(unpackPoints(fragment), path, radius + fragment.size / 2);
       if (!result.changed) {
         after.push(fragment);
         continue;
@@ -878,17 +894,21 @@ function eraseAreaAt(e: PointerEvent): void {
       changed = true;
       after.push(...fragmentStroke(fragment, result.fragments));
     }
-    if (changed) areaEraseChanges.set(original.id, { index, before: original, after });
+    if (!changed) continue;
+    areaEraseChanges.set(original.id, { before: original, after });
+    growBBox(repaint, original.bbox.minX, original.bbox.minY, 0);
+    growBBox(repaint, original.bbox.maxX, original.bbox.maxY, 0);
   }
   // The same pass carves pixels out of any picture it crosses — erasing feels
   // the same on a photograph as it does on ink, with no mode to enter first.
-  for (const image of board.images) {
-    if (image.frame !== board.activeFrame || image.layer !== board.activeLayer) continue;
+  for (const image of board.cellImages(board.activeFrame, board.activeLayer)) {
     if (!bboxIntersects(imageBBox(image), eraserBox)) continue;
     eraseImagePixels(image, path, radius);
   }
   areaEraseLast = point;
+  compositor.invalidate(board.activeFrame, board.activeLayer, repaint);
 }
+
 
 // The first touch swaps the picture's bitmap for a working canvas; every
 // following segment is punched straight out of it, so the hole appears under
@@ -945,6 +965,14 @@ function commitImageErase(): ImageSrcChange[] {
 
 function beginErase(e: PointerEvent): void {
   eraserCursor = { x: e.offsetX, y: e.offsetY };
+  // Until the gesture ends, the active cell shows the board as the eraser has
+  // left it: whole strokes gone, clipped ones swapped for their fragments.
+  compositor.setOverride(
+    board.activeFrame,
+    board.activeLayer,
+    (s) => (erasePending.has(s.id) ? [] : areaEraseChanges.get(s.id)?.after),
+    null
+  );
   if (eraserMode === 'area') {
     areaEraseChanges.clear();
     imageErase.clear();
@@ -957,8 +985,9 @@ function beginErase(e: PointerEvent): void {
 
 // ---- animation ------------------------------------------------------------
 
-// Ghost frames are rebuilt on board changes rather than per render, so drawing
-// a stroke does not re-filter every neighbouring frame sixty times a second.
+// Which neighbouring frames to ghost and how strongly, worked out on board
+// changes rather than per frame. The ghosts themselves are painted from the
+// same tiles those frames show when they are the one being worked on.
 let ghostCache: Ghost[] = [];
 
 function refreshGhosts(): void {
@@ -974,8 +1003,7 @@ function refreshGhosts(): void {
     const i = here + distance * direction;
     if (i < 0 || i >= board.frames.length) return;
     out.push({
-      strokes: board.visibleStrokes(board.frames[i].id),
-      images: board.visibleImages(board.frames[i].id),
+      frame: board.frames[i].id,
       alpha: o.opacity * Math.pow(0.55, distance - 1),
       tint: o.tint ? (direction < 0 ? ONION_BEFORE : ONION_AFTER) : null,
     });
@@ -985,16 +1013,26 @@ function refreshGhosts(): void {
   ghostCache = out;
 }
 
+// Called on every board change, so it first checks whether anything it shows
+// has changed at all — a new stroke almost never changes the timeline.
+let timelineKey = '';
 function renderTimeline(): void {
   if (frameDrag?.moved) return;
   const n = board.frames.length;
   const here = board.frameIndex;
   frameLabel.textContent = `${here + 1} / ${n}`;
 
-  const filled = new Set([
-    ...board.strokes.map((stroke) => stroke.frame),
-    ...board.images.map((image) => image.frame),
-  ]);
+  const filled = new Set(board.frames.filter((f) => board.count(f.id) > 0).map((f) => f.id));
+  const key = [
+    board.activeFrame,
+    ...board.frames.map((f) => (filled.has(f.id) ? `+${f.id}` : f.id)),
+    playing,
+    loop,
+    board.onion.enabled,
+    board.fps,
+  ].join('|');
+  if (key === timelineKey) return;
+  timelineKey = key;
   frameStrip.textContent = '';
   board.frames.forEach((f, i) => {
     const cell = document.createElement('button');
@@ -1068,6 +1106,7 @@ function endFrameDrag(): void {
     board.frames.findIndex((f) => f.id === id),
     cells.findIndex((c) => c.dataset.id === id)
   );
+  timelineKey = ''; // the drag rearranged the cells by hand; lay them out afresh
   renderTimeline();
 }
 
@@ -1243,16 +1282,19 @@ function modelIndex(displayIndex: number): number {
 let layerDrag: { id: string; startY: number; moved: boolean } | null = null;
 let renamingId: string | null = null;
 
+// Like the timeline, rebuilt only when something it shows has changed.
+let layersKey = '';
 function renderLayers(): void {
   if (layerDrag?.moved || renamingId) return; // never yank the DOM out from under an interaction
-  layerList.textContent = '';
   const counts = new Map<string, number>();
-  for (const s of board.strokes) {
-    if (s.frame === board.activeFrame) counts.set(s.layer, (counts.get(s.layer) ?? 0) + 1);
-  }
-  for (const image of board.images) {
-    if (image.frame === board.activeFrame) counts.set(image.layer, (counts.get(image.layer) ?? 0) + 1);
-  }
+  for (const layer of board.layers) counts.set(layer.id, board.count(board.activeFrame, layer.id));
+  const key = [
+    board.activeLayer,
+    ...board.layers.map((l) => `${l.id}:${l.name}:${l.visible}:${l.opacity}:${counts.get(l.id)}`),
+  ].join('|');
+  if (key === layersKey) return;
+  layersKey = key;
+  layerList.textContent = '';
 
   for (let i = board.layers.length - 1; i >= 0; i--) {
     const layer = board.layers[i];
@@ -1311,6 +1353,7 @@ function startRename(row: HTMLElement, id: string, current: string): void {
     if (renamingId !== id) return;
     renamingId = null;
     if (save) board.renameLayer(id, input.value);
+    layersKey = ''; // the row still holds the text field
     renderLayers();
   };
   input.addEventListener('blur', () => commit(true));
@@ -1357,6 +1400,7 @@ function endLayerDrag(): void {
   const to = modelIndex(rows.findIndex((r) => r.dataset.id === id));
   const from = board.layers.findIndex((l) => l.id === id);
   board.moveLayer(from, to);
+  layersKey = ''; // the drag rearranged the rows by hand
   renderLayers();
 }
 
@@ -1553,8 +1597,9 @@ function captureRegion(x0: number, y0: number, x1: number, y1: number): void {
     height: Math.abs(y1 - y0),
   };
   if (rect.width < 12 || rect.height < 12) return; // a stray tap, not a box
+  const quad = quadFromScreenRect(x0, y0, x1, y1);
   const canvasEl = renderRegion(
-    board.visibleStrokes(),
+    board.visibleStrokesIn(board.activeFrame, polygonBBox(quad)),
     board.visibleImages(),
     board.layers,
     camera,
@@ -1563,7 +1608,7 @@ function captureRegion(x0: number, y0: number, x1: number, y1: number): void {
   );
   const dataURL = canvasEl.toDataURL('image/png');
   region = {
-    quad: quadFromScreenRect(x0, y0, x1, y1),
+    quad,
     dataURL,
     base64: dataURL.slice(dataURL.indexOf(',') + 1),
   };
@@ -1696,24 +1741,22 @@ window.betterboard.onAiDraw(({ requestId, drawing }) => {
     color: target.color,
     size: target.size,
   });
-  const strokes = lines.map((line): Stroke => {
-    const stroke: Stroke = {
-      id: uid(),
-      seq: board.takeSeq(),
-      color: line.color,
-      size: line.size,
-      pen: false,
-      brush: 'pen',
-      seed: (Math.random() * 0xffffffff) >>> 0,
-      layer: target.layer,
-      frame: target.frame,
-      points: line.points,
-      bbox: emptyBBox(),
-    };
-    for (const point of stroke.points) growBBox(stroke.bbox, point.x, point.y, stroke.size / 2 + 2);
-    stroke.path = buildPath(stroke);
-    return stroke;
-  });
+  const strokes = lines.map((line) =>
+    makeStroke(
+      {
+        id: uid(),
+        seq: board.takeSeq(),
+        color: line.color,
+        size: line.size,
+        pen: false,
+        brush: 'pen',
+        seed: (Math.random() * 0xffffffff) >>> 0,
+        layer: target.layer,
+        frame: target.frame,
+      },
+      line.points
+    )
+  );
   // A response may issue more than one tool call. Buffer all of them until the
   // response finishes so the complete annotation is one undo operation.
   target.strokes.push(...strokes);
@@ -1900,10 +1943,18 @@ function selectImage(image: BoardImage): void {
 // — or, once it has been reshaped, the box exactly as it was let go. Measuring
 // the ink again would pull the grips in from under the pointer, anchored edge
 // included, because a line's width follows a stretch less than its length does.
+// Measured once per selection and board revision: hovering asks for it on
+// every pointer move, and a big selection is a lot of boxes to add up.
+let boxMemo: { sel: BoardSelection; revision: number; box: Rect | null } | null = null;
 function selectionBox(): Rect | null {
-  if (selection?.box) return selection.box;
-  const box = board.contentBBox(selectedStrokes(), selectedImages());
-  return box ? bboxRect(box) : null;
+  const sel = selection;
+  if (!sel) return null;
+  if (sel.box) return sel.box;
+  if (boxMemo && boxMemo.sel === sel && boxMemo.revision === board.revision) return boxMemo.box;
+  const b = board.contentBBox(selectedStrokes(), selectedImages());
+  const box = b ? bboxRect(b) : null;
+  boxMemo = { sel, revision: board.revision, box };
+  return box;
 }
 
 function shiftSelection(sel: BoardSelection, dx: number, dy: number): void {
@@ -1970,23 +2021,25 @@ function beginReshape(grip: NonNullable<ReturnType<typeof gripAt>>): Reshape {
     images,
     preview: new Map(),
     stale: false,
-    affine: false,
+    // A selection too big to lift stroke by stroke is too big to rebuild
+    // either: it goes straight to the stretched pass.
+    affine: lifted?.tiles === true,
   };
 }
 
 // Brings the on-screen preview up to the latest `to`, once per frame however
-// many pointer events arrived. Pictures are resized in place — a rectangle is
-// cheap — and put back before the edit is recorded.
+// many pointer events arrived. Pictures need nothing: they are drawn through
+// the drag's map, which is exact for a rectangle.
 function refreshReshape(t: Reshape): void {
   if (!t.stale) return;
   t.stale = false;
-  for (const [id, r] of t.images) {
-    const image = board.images.find((im) => im.id === id);
-    if (image) Object.assign(image, transformRect(r, t.from, t.to));
-  }
   if (t.affine) return;
   const started = performance.now();
-  for (const s of t.strokes) t.preview.set(s.id, transformStroke(s, t.from, t.to));
+  for (const s of t.strokes) {
+    const copy = transformStroke(s, t.from, t.to);
+    copy.path = buildPath(copy);
+    t.preview.set(s.id, copy);
+  }
   if (performance.now() - started > RESHAPE_BUDGET) {
     t.affine = true;
     t.preview.clear();
@@ -1994,10 +2047,6 @@ function refreshReshape(t: Reshape): void {
 }
 
 function commitReshape(t: Reshape): void {
-  for (const [id, r] of t.images) {
-    const image = board.images.find((im) => im.id === id);
-    if (image) Object.assign(image, r);
-  }
   const { from, to } = t;
   if (from.x === to.x && from.y === to.y && from.width === to.width && from.height === to.height) return;
   board.transformItems(
@@ -2018,15 +2067,62 @@ function selectionMarquee(sel: BoardSelection): Marquee {
   const map = t ? boxAffine(t.from, t.to) : { sx: 1, sy: 1, dx: moveX, dy: moveY };
   return {
     poly: sel.loop || !box ? sel.poly : boxPoly(box),
-    // A move lifts everything into the shifted pass. A reshape shows rebuilt
-    // copies instead and resizes pictures in place, so only ink too heavy to
-    // rebuild live goes through the stretched pass.
-    ids: t ? (t.affine ? sel.ids : null) : sel.ids,
-    imageIds: t ? null : sel.images,
     grips: box ? gripsOf(box, t ? t.to : box).map((g) => g.p) : null,
     frame: sel.loop === true,
     ...map,
     dashOffset,
+  };
+}
+
+// A selection picked up by a drag: hidden from its cell until the drag ends,
+// and drawn on top of it through the drag's map meanwhile. Up to a point it
+// is drawn stroke by stroke every frame; past that it is painted into tiles
+// of its own once and those are what move.
+let lifted: { items: Item[]; images: BoardImage[]; tiles: boolean; box: BBox } | null = null;
+
+function liftSelection(): void {
+  const sel = selection;
+  if (!sel || lifted) return;
+  const strokes = selectedStrokes();
+  const images = selectedImages();
+  let points = 0;
+  for (const s of strokes) points += s.n;
+  const tiles = strokes.length > LIFT_DIRECT || points > LIFT_DIRECT * 100;
+  const items: Item[] = tiles ? [] : [...strokes, ...images].sort(bySeq);
+  lifted = { items, images, tiles, box: board.contentBBox(strokes, images) ?? emptyBBox() };
+  const frame = board.activeFrame;
+  const layer = board.activeLayer;
+  compositor.setOverride(frame, layer, (s) => (sel.ids.has(s.id) ? [] : undefined), sel.images);
+  if (tiles) compositor.setLiftSource({ frame, layer, ids: sel.ids, images: sel.images });
+  compositor.invalidate(frame, layer, lifted.box);
+}
+
+// Puts the selection back down. Whatever the drag committed has already
+// reported where it changed the board; this repaints where it was lifted from,
+// which matters when the drag ended where it began.
+function dropLift(): void {
+  if (!lifted) return;
+  const box = lifted.box;
+  lifted = null;
+  compositor.setOverride(board.activeFrame, board.activeLayer, null, null);
+  compositor.setLiftSource(null);
+  compositor.invalidate(board.activeFrame, board.activeLayer, box);
+  requestRender();
+}
+
+// What the frame should show of the lifted selection right now. A move
+// carries everything bodily; a reshape shows rebuilt copies of the ink while
+// it can afford to, and the ink itself, stretched, once it cannot.
+function currentLift(): Lift | null {
+  if (!lifted || !selection) return null;
+  const t = drag?.kind === 'transform' ? drag : null;
+  const map = t ? boxAffine(t.from, t.to) : { sx: 1, sy: 1, dx: moveX, dy: moveY };
+  const preview = t && !t.affine ? [...t.preview.values()] : null;
+  return {
+    map,
+    items: lifted.tiles ? [] : preview ? lifted.images : lifted.items,
+    tiles: lifted.tiles,
+    preview,
   };
 }
 
@@ -2327,6 +2423,7 @@ function syncAnts(): void {
 
 function clearSelection(): void {
   clearWandSelection();
+  dropLift();
   if (!selection && !lasso) return;
   selection = null;
   lasso = null;
@@ -2355,14 +2452,12 @@ function addLassoPoint(e: PointerEvent): void {
 // every point makes grazing a long stroke's tail feel broken.
 function strokesInside(poly: Point[]): Set<string> {
   const ids = new Set<string>();
-  const box = polygonBBox(poly);
-  for (const s of board.strokes) {
-    if (!editable(s) || !bboxIntersects(s.bbox, box)) continue;
+  for (const s of editableNear(polygonBBox(poly))) {
     let hits = 0;
-    for (const pt of s.points) {
-      if (pointInPolygon(poly, pt.x, pt.y)) hits++;
+    for (let j = 0, end = s.n * 3; j < end; j += 3) {
+      if (pointInPolygon(poly, s.ox + s.pts[j], s.oy + s.pts[j + 1])) hits++;
     }
-    if (hits / s.points.length >= ENCLOSED) ids.add(s.id);
+    if (hits / s.n >= ENCLOSED) ids.add(s.id);
   }
   return ids;
 }
@@ -2378,9 +2473,12 @@ function selectAt(w: Point): void {
     selection = { ids: new Set(), images: new Set([im.id]), poly: rectPoly(imageBBox(im)) };
     return;
   }
-  for (let i = board.strokes.length - 1; i >= 0; i--) {
-    const s = board.strokes[i];
-    if (!editable(s) || !strokeHit(s, w.x, w.y, radius)) continue;
+  let top: Stroke | null = null;
+  for (const s of editableNear({ minX: w.x - radius, minY: w.y - radius, maxX: w.x + radius, maxY: w.y + radius })) {
+    if (strokeHit(s, w.x, w.y, radius) && (!top || s.seq > top.seq)) top = s;
+  }
+  if (top) {
+    const s = top;
     const pad = 6 / camera.scale;
     const b = s.bbox;
     selection = {
@@ -2485,12 +2583,14 @@ canvas.addEventListener('pointerdown', (e) => {
     const w = toWorld(camera, e.offsetX, e.offsetY);
     const grip = gripAt(e.offsetX, e.offsetY);
     if (grip) {
+      liftSelection();
       drag = beginReshape(grip);
     } else if (selection && insideSelection(w)) {
       // Press inside the outline picks the selection up instead of redrawing it.
       drag = { kind: 'move', startX: e.clientX, startY: e.clientY };
       moveX = 0;
       moveY = 0;
+      liftSelection();
     } else {
       selection = null;
       hoverInSelection = false;
@@ -2576,7 +2676,7 @@ canvas.addEventListener('pointermove', (e) => {
     let added = false;
     for (const ev of events) added = addLivePoint(ev) || added;
     if (added && live) {
-      live.path = buildPath(live, true);
+      liveDirty = true;
       requestRender();
     }
   } else {
@@ -2605,6 +2705,7 @@ function endGesture(e: PointerEvent): void {
       board.removeStrokes(new Set(erasePending));
     }
     erasePending.clear();
+    compositor.setOverride(board.activeFrame, board.activeLayer, null, null);
   } else if (drag.kind === 'lasso') {
     addLassoPoint(e);
     commitLasso();
@@ -2621,6 +2722,7 @@ function endGesture(e: PointerEvent): void {
     moveX = 0;
     moveY = 0;
   }
+  if (drag.kind === 'move' || drag.kind === 'transform') dropLift();
   drag = null;
   activePointer = null;
   if (tool !== 'eraser') eraserCursor = null;
@@ -2825,7 +2927,7 @@ window.addEventListener('blur', () => {
 // ---- menu / file actions --------------------------------------------------
 
 async function newBoard(): Promise<void> {
-  if (board.strokes.length > 0 || board.images.length > 0) {
+  if (board.strokeCount > 0 || board.images.length > 0) {
     const ok = await window.betterboard.confirm(
       'Start a new board?',
       'The current board will be cleared. Save it first if you want to keep it.'
@@ -2846,29 +2948,46 @@ async function newBoard(): Promise<void> {
   scheduleAutosave();
 }
 
+// A file is read in pieces, so a board of any size opens; a big one says how
+// far along it is rather than leaving the window apparently frozen.
 async function openBoard(): Promise<void> {
-  const json = await window.betterboard.openBoard();
-  if (!json) return;
+  let saved: Camera | null;
   try {
+    const snap = await openBoardFile((done, total) => {
+      if (total > 32 << 20) toast(`Opening… ${Math.round((done / total) * 100)}%`);
+    });
+    if (!snap) return;
     clearSelection();
-    const saved = board.deserialize(json);
-    // A board always opens the right way round; see fileCamera.
-    camera.flip = false;
-    syncFlip();
-    if (saved) {
-      camera.x = saved.x;
-      camera.y = saved.y;
-      camera.scale = saved.scale;
-      camera.rotation = saved.rotation;
-      updateWheel();
-      updateZoomLabel();
-      requestRender();
-    } else {
-      zoomFit();
-    }
-    scheduleAutosave();
+    saved = board.load(snap);
   } catch {
     await window.betterboard.confirm('Could not open file', 'It is not a BetterBoard board.');
+    return;
+  }
+  // A board always opens the right way round; see fileCamera.
+  camera.flip = false;
+  syncFlip();
+  if (saved) {
+    camera.x = saved.x;
+    camera.y = saved.y;
+    camera.scale = saved.scale;
+    camera.rotation = saved.rotation;
+    updateWheel();
+    updateZoomLabel();
+    requestRender();
+  } else {
+    zoomFit();
+  }
+  if (board.strokeCount > 50_000) toast(`Opened ${board.strokeCount.toLocaleString()} strokes`);
+  scheduleAutosave();
+}
+
+async function saveBoard(): Promise<void> {
+  const big = board.strokeCount > 50_000;
+  try {
+    if (big) toast('Saving…');
+    if ((await saveBoardFile(board, fileCamera())) && big) toast('Saved');
+  } catch (err) {
+    await window.betterboard.confirm('Could not save the board', err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -3011,7 +3130,7 @@ window.betterboard.onMenu((action) => {
       void openBoard();
       break;
     case 'save':
-      void window.betterboard.saveBoard(board.serialize(fileCamera()));
+      void saveBoard();
       break;
     case 'export':
       void exportPNG();
@@ -3066,7 +3185,7 @@ window.betterboard.onMenu((action) => {
       break;
     case 'clear':
       void (async () => {
-        if (board.frameStrokes().length === 0 && board.imagesOn().length === 0) return;
+        if (board.count(board.activeFrame) === 0) return;
         if (await window.betterboard.confirm('Clear this frame?', 'You can undo this.')) {
           clearSelection();
           board.clear();
@@ -3724,31 +3843,35 @@ function paintPad(): void {
   const c = sizeCanvas(sizePad, PAD_W, PAD_H);
   c.fillStyle = THEMES[themeName].bg;
   c.fillRect(0, 0, PAD_W, PAD_H);
+  const dpr = window.devicePixelRatio || 1;
   for (const s of [...padStrokes, ...(padLive ? [padLive] : [])]) {
-    if (!s.path) continue;
-    c.fillStyle = s.color;
-    c.globalAlpha = BRUSHES[s.brush].alpha;
-    c.fill(s.path);
-    c.globalAlpha = 1;
+    if (s.path) drawStroke(c, s, [dpr, 0, 0, dpr, 0, 0], dpr, s.path);
   }
 }
 
 // A miniature board, drawn with the live brush at its real size. It is the
 // only honest answer to "how big is 12?", which no number and no dot can give.
 function wireSizePad(): void {
-  const padStroke = (e: PointerEvent): Stroke => ({
-    id: uid(),
-    seq: 0,
-    color,
-    size: size * BRUSHES[brush].sizeScale,
-    pen: e.pointerType === 'pen',
-    brush,
-    seed: (Math.random() * 0xffffffff) >>> 0,
-    layer: '',
-    frame: '',
-    points: [{ x: e.offsetX, y: e.offsetY, p: pressureOf(e) }],
-    bbox: emptyBBox(),
-  });
+  const padStroke = (e: PointerEvent): Stroke => {
+    const s: Stroke = {
+      id: uid(),
+      seq: 0,
+      color,
+      size: size * BRUSHES[brush].sizeScale,
+      pen: e.pointerType === 'pen',
+      brush,
+      seed: (Math.random() * 0xffffffff) >>> 0,
+      layer: '',
+      frame: '',
+      ox: e.offsetX,
+      oy: e.offsetY,
+      pts: new Float32Array(96),
+      n: 0,
+      bbox: emptyBBox(),
+    };
+    appendPoint(s, e.offsetX, e.offsetY, pressureOf(e));
+    return s;
+  };
 
   sizePad.addEventListener('pointerdown', (e) => {
     padLive = padStroke(e);
@@ -3758,14 +3881,13 @@ function wireSizePad(): void {
   });
   sizePad.addEventListener('pointermove', (e) => {
     if (!padLive) return;
-    for (const ev of e.getCoalescedEvents?.() ?? [e]) {
-      padLive.points.push({ x: ev.offsetX, y: ev.offsetY, p: pressureOf(ev) });
-    }
+    for (const ev of e.getCoalescedEvents?.() ?? [e]) appendPoint(padLive, ev.offsetX, ev.offsetY, pressureOf(ev));
     padLive.path = buildPath(padLive, true);
     paintPad();
   });
   const finish = (): void => {
     if (!padLive) return;
+    sealPoints(padLive);
     padLive.path = buildPath(padLive, false);
     padStrokes.push(padLive);
     if (padStrokes.length > 40) padStrokes.shift();
@@ -3935,7 +4057,7 @@ function fillAt(e: PointerEvent): void {
   const buffer = document.createElement('canvas');
   buffer.width = layout.width;
   buffer.height = layout.height;
-  paintExport(buffer, board.visibleStrokes(), board.visibleImages(), board.layers, THEMES[themeName], layout);
+  paintExport(buffer, board.visibleStrokesIn(board.activeFrame, view), board.visibleImages(), board.layers, THEMES[themeName], layout);
 
   const bctx = buffer.getContext('2d', { willReadFrequently: true })!;
   const pixels = bctx.getImageData(0, 0, buffer.width, buffer.height);
@@ -4001,7 +4123,13 @@ function fillAt(e: PointerEvent): void {
 
 function selectedStrokes(): Stroke[] {
   const sel = selection;
-  return sel ? board.strokes.filter((s) => sel.ids.has(s.id)) : [];
+  if (!sel) return [];
+  const out: Stroke[] = [];
+  for (const id of sel.ids) {
+    const s = board.stroke(id);
+    if (s) out.push(s);
+  }
+  return out;
 }
 
 function selectedImages(): BoardImage[] {
@@ -4024,7 +4152,6 @@ function pasteClip(clip: Clip, at?: Point): void {
     frame: board.activeFrame,
     takeSeq: () => board.takeSeq(),
   });
-  for (const s of strokes) s.path = buildPath(s);
   board.addItems(strokes, images);
   selectPlaced(strokes, images);
 }
@@ -4133,10 +4260,8 @@ function selectAll(): void {
     focused.select();
     return;
   }
-  const strokes = board.strokes.filter(editable);
-  const images = board.images.filter(
-    (im) => im.frame === board.activeFrame && im.layer === board.activeLayer
-  );
+  const strokes = board.cellStrokes(board.activeFrame, board.activeLayer);
+  const images = [...board.cellImages(board.activeFrame, board.activeLayer)];
   const box = board.contentBBox(strokes, images);
   if (!box) return;
   setTool('select');
@@ -4187,7 +4312,7 @@ function setStickersOpen(open: boolean): void {
 async function loadStickers(): Promise<void> {
   try {
     const raw = await window.betterboard.loadStickers();
-    stickers = (Array.isArray(raw) ? raw : []).filter(isSticker);
+    stickers = (Array.isArray(raw) ? raw : []).filter(isSticker).map(stickerFromJSON);
   } catch {
     stickers = [];
   }
@@ -4195,7 +4320,7 @@ async function loadStickers(): Promise<void> {
 }
 
 function persistStickers(): void {
-  void window.betterboard.saveStickers(stickers);
+  void window.betterboard.saveStickers(stickers.map(stickerToJSON));
 }
 
 // A sticker keeps the strokes, not a picture of them: stamped back down it is
@@ -4335,6 +4460,20 @@ async function main(): Promise<void> {
   // pasted picture or a fresh bucket fill has nothing to show until its bitmap
   // lands, and without this it waits for whatever happens to redraw next.
   board.onRedraw = requestRender;
+  // Edits reach the tile cache as they happen: a region to repaint, a stroke
+  // to paint straight on top, or everything at once.
+  board.onDirty = (frame, layer, box) => {
+    compositor.invalidate(frame, layer, box);
+    requestRender();
+  };
+  board.onAppend = (stroke) => {
+    compositor.append(stroke);
+    requestRender();
+  };
+  board.whenReset(() => {
+    compositor.reset();
+    requestRender();
+  });
   board.onChange = () => {
     refreshGhosts();
     requestRender();
@@ -4352,20 +4491,29 @@ async function main(): Promise<void> {
   window.addEventListener('resize', resizeCanvas);
   resizeCanvas();
 
-  const saved = await window.betterboard.loadAutosave();
+  // The window asks for one last save on its way closed.
+  window.betterboard.onFlush(() => {
+    void autosave.flush().finally(() => window.betterboard.flushed());
+  });
+
+  // A big board takes a moment to read back; say so rather than sit blank.
+  const slow = window.setTimeout(() => toast('Loading your board…'), 400);
   let restored = false;
-  if (saved) {
-    try {
-      const cam = board.deserialize(saved);
-      if (cam) {
-        camera.x = cam.x;
-        camera.y = cam.y;
-        camera.scale = cam.scale;
-        camera.rotation = cam.rotation;
-        restored = true;
-      }
-    } catch {}
+  try {
+    const cam = await autosave.load();
+    if (cam) {
+      camera.x = cam.x;
+      camera.y = cam.y;
+      camera.scale = cam.scale;
+      camera.rotation = cam.rotation;
+      restored = true;
+    }
+  } catch (err) {
+    console.error('could not restore the autosave:', err);
+    await autosave.quarantine();
+    toast('The last session could not be read. It was set aside and a fresh board started.');
   }
+  clearTimeout(slow);
   if (!restored) {
     camera.x = -cssWidth / 2;
     camera.y = -cssHeight / 2;
@@ -4378,6 +4526,30 @@ async function main(): Promise<void> {
   syncOnionPanel();
   refreshGhosts();
   requestRender();
+  performance.mark('bb:ready');
+  if (window.betterboard.bench) {
+    Object.assign(window, {
+      __bb: {
+        board,
+        camera,
+        ctx,
+        canvas,
+        drawFrame,
+        requestRender,
+        compositor,
+        autosave,
+        get state() {
+          return {
+            tool,
+            drag: drag?.kind ?? null,
+            lasso: lasso?.length ?? null,
+            selection: selection ? { ids: selection.ids.size, images: selection.images.size, poly: selection.poly.length } : null,
+            lifted: lifted ? { tiles: lifted.tiles, items: lifted.items.length } : null,
+          };
+        },
+      },
+    });
+  }
 
   // First launch: ask what kind of work this board is for, so the layout
   // starts out shaped for it. Answered (or skipped) exactly once.

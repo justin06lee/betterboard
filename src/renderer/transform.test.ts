@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { makeStroke, pointAt, unpackPoints } from './points';
 import type { Stroke } from './types';
 import {
   OPPOSITE,
@@ -98,34 +99,28 @@ describe('reshaping', () => {
   const stretched = { x: 100, y: 100, width: 400, height: 100 }; // twice as wide
 
   function stroke(): Stroke {
-    return {
-      id: 's',
-      seq: 3,
-      color: '#000000',
-      size: 4,
-      pen: true,
-      brush: 'pen',
-      seed: 7,
-      layer: 'l',
-      frame: 'f',
-      points: [
+    return makeStroke(
+      { id: 's', seq: 3, color: '#000000', size: 4, pen: true, brush: 'pen', seed: 7, layer: 'l', frame: 'f' },
+      [
         { x: 100, y: 100, p: 0.3 },
         { x: 300, y: 200, p: 0.8 },
-      ],
-      bbox: { minX: 94, minY: 94, maxX: 306, maxY: 206 },
-    };
+      ]
+    );
   }
 
   test('a stroke is carried through the map and keeps what makes it itself', () => {
     const before = stroke();
     const after = transformStroke(before, box, stretched);
-    expect(after.points).toEqual([
-      { x: 100, y: 100, p: 0.3 },
-      { x: 500, y: 200, p: 0.8 },
+    const points = unpackPoints(after);
+    expect(points.map((p) => [p.x, p.y])).toEqual([
+      [100, 100],
+      [500, 200],
     ]);
+    expect(points[0].p).toBeCloseTo(0.3, 6);
+    expect(points[1].p).toBeCloseTo(0.8, 6);
     expect(after).toMatchObject({ id: 's', seq: 3, seed: 7, brush: 'pen', layer: 'l', frame: 'f' });
-    expect(after.path).toBeDefined();
-    expect(before.points[1].x).toBe(300); // the original is left alone for undo
+    expect(after.path).toBeUndefined(); // drawn again along its new path, the first time it is painted
+    expect(pointAt(before, 1).x).toBe(300); // the original is left alone for undo
   });
 
   test('a stretch widens the line by the geometric mean; an even scale by exactly the scale', () => {
@@ -135,7 +130,7 @@ describe('reshaping', () => {
 
   test('the reshaped bounds still wrap the ink', () => {
     const after = transformStroke(stroke(), box, stretched);
-    for (const pt of after.points) {
+    for (const pt of unpackPoints(after)) {
       expect(pt.x - after.size / 2).toBeGreaterThanOrEqual(after.bbox.minX);
       expect(pt.x + after.size / 2).toBeLessThanOrEqual(after.bbox.maxX);
       expect(pt.y - after.size / 2).toBeGreaterThanOrEqual(after.bbox.minY);

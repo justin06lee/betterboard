@@ -10,6 +10,7 @@ interface Dab {
 
 class RecordingPath2D {
   dabs: Dab[] = [];
+  rects: { x: number; y: number; w: number; h: number }[] = [];
   ops: string[] = [];
   moveTo(): void {
     this.ops.push('moveTo');
@@ -20,8 +21,9 @@ class RecordingPath2D {
   closePath(): void {
     this.ops.push('close');
   }
-  rect(): void {
+  rect(x: number, y: number, w: number, h: number): void {
     this.ops.push('rect');
+    this.rects.push({ x, y, w, h });
   }
   addPath(): void {
     this.ops.push('addPath');
@@ -34,33 +36,37 @@ class RecordingPath2D {
 
 Object.assign(globalThis, { Path2D: RecordingPath2D });
 
-const { buildPath } = await import('./ink');
-
-function chalk(overrides: Partial<Stroke> = {}): Stroke {
-  return {
-    id: 'chalk-stroke',
-    seq: 0,
-    color: '#ffffff',
-    size: 20,
-    pen: false,
-    brush: 'chalk',
-    seed: 12345,
-    layer: 'layer',
-    frame: 'frame',
-    points: line(0, 0, 200, 0, 40),
-    bbox: { minX: 0, minY: -10, maxX: 200, maxY: 10 },
-    ...overrides,
-  } as Stroke;
-}
+const { buildPath, pathOf, strokeHit } = await import('./ink');
+const { makeStroke } = await import('./points');
 
 type Stroke = import('./types').Stroke;
+type StrokePoint = import('./types').StrokePoint;
 
-function line(x0: number, y0: number, x1: number, y1: number, count: number): Stroke['points'] {
+function line(x0: number, y0: number, x1: number, y1: number, count: number): StrokePoint[] {
   return Array.from({ length: count }, (_, i) => ({
     x: x0 + ((x1 - x0) * i) / (count - 1),
     y: y0 + ((y1 - y0) * i) / (count - 1),
     p: 0.5,
   }));
+}
+
+function chalk(overrides: Partial<Stroke> & { points?: StrokePoint[] } = {}): Stroke {
+  const { points = line(0, 0, 200, 0, 40), ...fields } = overrides;
+  return makeStroke(
+    {
+      id: 'chalk-stroke',
+      seq: 0,
+      color: '#ffffff',
+      size: 20,
+      pen: false,
+      brush: 'chalk',
+      seed: 12345,
+      layer: 'layer',
+      frame: 'frame',
+      ...fields,
+    },
+    points
+  );
 }
 
 const dabsOf = (stroke: Stroke): Dab[] => (buildPath(stroke) as unknown as RecordingPath2D).dabs;
@@ -110,6 +116,17 @@ describe('chalk brush', () => {
     }
   });
 
+  test('never lands outside the box the board culls it by', () => {
+    const stroke = chalk();
+    const b = stroke.bbox;
+    for (const dab of dabsOf(stroke)) {
+      expect(stroke.ox + dab.x - dab.r).toBeGreaterThanOrEqual(b.minX);
+      expect(stroke.ox + dab.x + dab.r).toBeLessThanOrEqual(b.maxX);
+      expect(stroke.oy + dab.y - dab.r).toBeGreaterThanOrEqual(b.minY);
+      expect(stroke.oy + dab.y + dab.r).toBeLessThanOrEqual(b.maxY);
+    }
+  });
+
   test('spreads across the width instead of hugging the centerline', () => {
     const dabs = dabsOf(chalk());
     const spread = Math.max(...dabs.map((d) => Math.abs(d.y)));
@@ -132,5 +149,50 @@ describe('chalk brush', () => {
 
   test('a single point still leaves a mark', () => {
     expect(dabsOf(chalk({ points: [{ x: 5, y: 7, p: 0.5 }] }))).toHaveLength(1);
+  });
+
+  test('grinds the same grain wherever on the board it is drawn', () => {
+    // Outlines are built relative to the stroke's own origin, so the far end
+    // of an infinite board gets exactly the grain the middle does.
+    const here = dabsOf(chalk());
+    const far = dabsOf(chalk({ points: line(4_000_000, -9_000_000, 4_000_200, -9_000_000, 40) }));
+    expect(far).toEqual(here);
+  });
+});
+
+describe('outlines', () => {
+  test('a pixel stroke snaps to the world grid, written relative to itself', () => {
+    const s = makeStroke(
+      { id: 'px', seq: 0, color: '#fff', size: 4, pen: false, brush: 'pixel', seed: 1, layer: 'l', frame: 'f' },
+      [{ x: 13, y: 21, p: 0.5 }]
+    );
+    // The world cell is (12, 20)–(16, 24); the stroke starts at (13, 21).
+    expect((buildPath(s) as unknown as RecordingPath2D).rects).toEqual([{ x: -1, y: -1, w: 4, h: 4 }]);
+  });
+
+  test('are built once and kept', () => {
+    const s = chalk();
+    expect(s.path).toBeUndefined();
+    const path = pathOf(s);
+    expect(pathOf(s)).toBe(path);
+    expect(s.path).toBe(path);
+  });
+});
+
+describe('strokeHit', () => {
+  const far = 9_000_000;
+  const pen = makeStroke(
+    { id: 'far', seq: 0, color: '#fff', size: 4, pen: false, brush: 'pen', seed: 1, layer: 'l', frame: 'f' },
+    line(far, far, far + 100, far, 20)
+  );
+
+  test('finds a stroke drawn far from the origin', () => {
+    expect(strokeHit(pen, far + 50, far + 1, 1)).toBe(true);
+    expect(strokeHit(pen, far + 50, far + 20, 1)).toBe(false);
+  });
+
+  test('reaches the width of the ink, not just its centerline', () => {
+    expect(strokeHit(pen, far + 50, far + 2.9, 1)).toBe(true);
+    expect(strokeHit(pen, far + 50, far + 3.2, 1)).toBe(false);
   });
 });
