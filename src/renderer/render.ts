@@ -4,18 +4,24 @@ import { BRUSHES, bboxIntersects, emptyBBox, growBBox, imageBBox, toScreen, toWo
 type Matrix = [number, number, number, number, number, number];
 
 // The lasso being drawn, or a committed selection being dragged. `poly` is in
-// world coordinates; `dx`/`dy` is the in-progress move offset, also in world
-// units, applied to both the outline and the strokes it holds.
+// world coordinates. The in-progress move or resize is the world -> world map
+// (x·sx + dx, y·sy + dy), applied to the outline, the grips, and whatever
+// strokes and pictures `ids` and `imageIds` list.
 export interface Marquee {
   poly: Point[];
   ids: Set<string> | null;
   imageIds?: Set<string> | null;
-  // Where the resize grips go. Given explicitly rather than derived from
-  // `poly`, which is the selection outline and may be a freehand lasso with
-  // dozens of vertices — one grip per vertex is not what anyone wants.
+  // Where the resize grips go, corners first. Given explicitly rather than
+  // derived from `poly`, which is the selection outline and may be a freehand
+  // lasso with dozens of vertices — one grip per vertex is not what anyone wants.
   grips?: Point[] | null;
+  // Draws the box through the corner grips as a hairline of its own, for an
+  // outline (a lasso) that says nothing about the box the grips work on.
+  frame?: boolean;
   dx: number;
   dy: number;
+  sx?: number;
+  sy?: number;
   dashOffset: number;
 }
 
@@ -115,9 +121,10 @@ function exportScratchContext(width: number, height: number, transform: Matrix):
 }
 
 // Paints one layer's strokes into a context already carrying the world
-// transform. Strokes being dragged are lifted into a translated pass so a move
-// costs one extra transform rather than a rebuild — but they stay inside their
-// own layer, so a moving stroke never jumps above the layers over it.
+// transform. Strokes being dragged are lifted into a transformed pass so a move
+// (or a resize with too much ink to rebuild at pointer speed) costs one extra
+// transform rather than a rebuild — but they stay inside their own layer, so a
+// moving stroke never jumps above the layers over it.
 function paintLayer(
   ctx: CanvasRenderingContext2D,
   bucket: Bucket,
@@ -146,14 +153,15 @@ function paintLayer(
     }
   }
   if (m && (moving || movingImages)) {
+    const sx = m.sx ?? 1;
+    const sy = m.sy ?? 1;
     ctx.save();
-    ctx.translate(m.dx, m.dy);
+    ctx.transform(sx, 0, 0, sy, m.dx, m.dy);
     for (const s of list) {
       if (!s.path || !moving?.has(s.id)) continue;
       const b = s.bbox;
-      if (!bboxIntersects({ minX: b.minX + m.dx, minY: b.minY + m.dy, maxX: b.maxX + m.dx, maxY: b.maxY + m.dy }, view)) {
-        continue;
-      }
+      const moved = { minX: b.minX * sx + m.dx, minY: b.minY * sy + m.dy, maxX: b.maxX * sx + m.dx, maxY: b.maxY * sy + m.dy };
+      if (!bboxIntersects(moved, view)) continue;
       fillStroke(ctx, s);
     }
     for (const im of pics) {
@@ -213,9 +221,12 @@ function drawMarquee(
   theme: Theme
 ): void {
   if (m.poly.length < 2) return;
+  const sx = m.sx ?? 1;
+  const sy = m.sy ?? 1;
+  const at = (p: Point) => toScreen(camera, p.x * sx + m.dx, p.y * sy + m.dy);
   ctx.beginPath();
   for (let i = 0; i < m.poly.length; i++) {
-    const p = toScreen(camera, m.poly[i].x + m.dx, m.poly[i].y + m.dy);
+    const p = at(m.poly[i]);
     if (i === 0) ctx.moveTo(p.x, p.y);
     else ctx.lineTo(p.x, p.y);
   }
@@ -241,8 +252,21 @@ function drawMarquee(
   ctx.setLineDash([]);
 
   if (!m.grips) return;
-  for (const p of m.grips) {
-    const s = toScreen(camera, p.x + m.dx, p.y + m.dy);
+  const grips = m.grips.map(at);
+  if (m.frame && grips.length >= 4) {
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) {
+      if (i === 0) ctx.moveTo(grips[i].x, grips[i].y);
+      else ctx.lineTo(grips[i].x, grips[i].y);
+    }
+    ctx.closePath();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = theme.accent;
+    ctx.globalAlpha = 0.6;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  for (const s of grips) {
     ctx.beginPath();
     ctx.rect(s.x - HANDLE / 2, s.y - HANDLE / 2, HANDLE, HANDLE);
     ctx.fillStyle = theme.accent;
@@ -338,8 +362,9 @@ export function render(
   }
 
   const m = opts.marquee;
-  const moving = m && m.ids && (m.dx !== 0 || m.dy !== 0) ? m.ids : null;
-  const movingImages = m && m.imageIds && (m.dx !== 0 || m.dy !== 0) ? m.imageIds : null;
+  const lifted = m !== null && (m.dx !== 0 || m.dy !== 0 || (m.sx ?? 1) !== 1 || (m.sy ?? 1) !== 1);
+  const moving = lifted && m?.ids ? m.ids : null;
+  const movingImages = lifted && m?.imageIds ? m.imageIds : null;
   const buckets = bucketByLayer(strokes, opts.images, opts.layers);
   for (const layer of opts.layers) {
     if (!layer.visible || layer.opacity === 0) continue;

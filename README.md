@@ -20,6 +20,7 @@ betterboard is a desktop whiteboard for macOS and Linux (x64 and arm64), designe
 - **Stylus-native gestures** — the pen's eraser end erases, the barrel button pans, touch pans
 - **Two eraser modes** — remove whole strokes, or sweep the eraser circle to remove whatever sits under it: ink is clipped, and pictures get their pixels carved out directly, with no separate image-editing mode. Either way a gesture is one undo step
 - **Lasso select** — loop your pen around anything to select it, then drag the marching-ants outline to move it; `⌫` deletes the selection, `Esc` drops it. `⌘A` takes everything on the layer
+- **Resize and stretch a selection** — every selection, your own strokes included, gets grips on its box: drag a corner to scale it (`⇧` frees the proportions, `⌥` scales about the middle) or an edge to stretch it wider or taller. Ink and pictures reshape together and undo in one step. A stretched stroke is drawn again along its new path rather than smeared, so it stays a clean line; its width follows the geometric mean of the stretch — the rule vector editors use — so an even scale is exact and a one-way stretch thickens the line only a little
 - **Copy, paste and duplicate a selection** — `⌘C`/`⌘X`/`⌘V` and `⌘D` on whatever you lassoed, or the bar that appears under it. What comes back is live ink, not a picture of it: the same strokes, the same brushes, the same seeds. A picture of the selection goes to the system clipboard at the same time, so the drawing pastes into any other app, and a marker written beside it is how paste tells "still my copy" from "someone copied something else since". `⌘D` duplicates the selection first and only falls through to duplicating the frame when the timeline is already open — it never opens the timeline itself
 - **Stickers** — keep any selection as a reusable cut-out. Stickers live outside the board file, so they are there for every board you open afterwards: click one to stamp it into the middle of the view, or drag it out of the tray to place it. Stamped down it is ordinary ink again — erasable, movable, drawable over
 - **Paint bucket** — `F`, then click. **Area** floods the closed shape under the pointer at an adjustable tolerance; **Similar** recolours every matching pixel in view at once. The fill is worked out from a fresh render of what is actually on screen — no grid, no marquee — so ink and photographs bound it the same way, and it tucks itself under anti-aliased edges instead of leaving a pale seam. An outline that is not closed says so rather than quietly filling the screen
@@ -68,6 +69,7 @@ The renderer is plain TypeScript on a 2D canvas (no framework), bundled with `bu
 | Erase | `E`, the stylus eraser end, or eraser tool; choose **Stroke** or **Area** beside the active eraser |
 | Select an area | `S`, then loop the pen around it (tap a stroke to select just that one) |
 | Move a selection | Drag from inside the outline |
+| Resize / stretch a selection | Drag a corner grip to scale (`⇧` frees the proportions, `⌥` scales about the middle) · drag an edge grip to stretch one way |
 | Delete / drop a selection | `⌫` / `Esc` |
 | Magic wand | `W`, then click a picture; **Point** selects the color region under the click, **Background** the whole backdrop, and the slider sets tolerance |
 | Apply a wand selection | **Erase selected** (or `⌫`) cuts it to transparency · **Keep only** cuts everything else |
@@ -133,6 +135,6 @@ Boards are JSON (version 5): lists of frames and of layers (`name`, `opacity`, `
 ## Roadmap
 
 - Custom app icon
-- Scale and rotate a selection, copy/paste between boards and frames
+- Rotate and mirror a selection
 - Shapes and text
 - Pen tilt support

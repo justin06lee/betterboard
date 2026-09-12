@@ -114,6 +114,38 @@ describe('Board.replaceStrokes', () => {
   });
 });
 
+describe('Board.transformItems', () => {
+  test('reshapes ink and pictures in one step, keeping ids and places', () => {
+    const board = new Board();
+    const a = stroke('a', 0, board);
+    const b = stroke('b', 1, board);
+    const picture = image('picture', 2, board);
+    board.strokes.push(a, b);
+    board.images.push(picture);
+    const bigger = { ...b, size: 8, points: [{ x: 5, y: 5, p: 0.5 }] };
+
+    board.transformItems([bigger], [{ id: 'picture', to: { x: 1, y: 2, width: 30, height: 10 } }]);
+    expect(board.strokes).toEqual([a, bigger]);
+    expect(board.strokes[1]).toBe(bigger);
+    expect(picture).toMatchObject({ x: 1, y: 2, width: 30, height: 10 });
+
+    board.undo();
+    expect(board.strokes[1]).toBe(b);
+    expect(picture).toMatchObject({ x: 0, y: 0, width: 10, height: 10 });
+
+    board.redo();
+    expect(board.strokes[1]).toBe(bigger);
+    expect(picture).toMatchObject({ x: 1, y: 2, width: 30, height: 10 });
+  });
+
+  test('a reshape that changes nothing records nothing', () => {
+    const board = new Board();
+    board.images.push(image('picture', 0, board));
+    board.transformItems([], [{ id: 'picture', to: { x: 0, y: 0, width: 10, height: 10 } }]);
+    expect(board.canUndo).toBe(false);
+  });
+});
+
 describe('Board.setImageSrc', () => {
   test('swaps the bitmap as one undoable operation', () => {
     const board = new Board();

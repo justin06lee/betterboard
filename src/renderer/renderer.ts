@@ -3,7 +3,7 @@ import { eraseStrokePoints } from './erase';
 import { backgroundSelect, dilate, floodSelect, maskBounds, maskTouchesBorder, similarSelect } from './pixels';
 import { drawingToLines } from './ai-drawing';
 import type { AiConnection, AiConnectionKind, AiConnectionState } from './global';
-import type { Ghost } from './render';
+import type { Ghost, Marquee } from './render';
 import type { ImageSrcChange, Rect, StrokeReplacement } from './store';
 import type { AnimFormat, AnimSettings } from './animation';
 import { animationLayout, exportAnimation, gifDelayMs } from './animation';
@@ -13,6 +13,19 @@ import type { Clip, Sticker } from './clip';
 import { MAX_STICKERS, isSticker, makeClip, placeClip, stickerName } from './clip';
 import type { Dock, DockSide } from './dock';
 import { createDock, isDockSide } from './dock';
+import type { GripMode } from './transform';
+import {
+  OPPOSITE,
+  bboxRect,
+  boxAffine,
+  boxGrips,
+  gripMode,
+  mapPoint,
+  resizeCursor,
+  resizeRect,
+  transformRect,
+  transformStroke,
+} from './transform';
 import type { HSV } from './color';
 import { hexToRgb, hsvToRgb, parseColor, pushRecent, rgbToHex, rgbToHsv } from './color';
 import type { BBox, BoardImage, BrushId, Camera, Point, Stroke } from './types';
@@ -115,9 +128,19 @@ let wandSel: { imageId: string; mask: Uint8Array; width: number; height: number;
 
 // The lasso path while it is being drawn, then the committed selection it
 // produced. Both live in world coordinates, so they stay put under pan, zoom
-// and rotation without any bookkeeping.
+// and rotation without any bookkeeping. `loop` marks an outline that is the
+// lasso as drawn; any other selection is outlined by its box, worked out fresh
+// from what it holds every time it is drawn — until it is reshaped, when `box`
+// keeps the box exactly as it was let go (see selectionBox).
+interface BoardSelection {
+  ids: Set<string>;
+  images: Set<string>;
+  poly: Point[];
+  loop?: boolean;
+  box?: Rect;
+}
 let lasso: Point[] | null = null;
-let selection: { ids: Set<string>; images: Set<string>; poly: Point[] } | null = null;
+let selection: BoardSelection | null = null;
 let moveX = 0;
 let moveY = 0;
 let hoverInSelection = false;
@@ -125,13 +148,31 @@ let hoverHandle: string | null = null;
 let dashOffset = 0;
 let antsTimer: number | undefined;
 
+// A grip being dragged. Everything is reshaped from the originals each frame,
+// never from the frame before, so nothing drifts however long the drag runs.
+interface Reshape {
+  kind: 'transform';
+  from: Rect; // the selection's box when the grip was taken
+  to: Rect; // where the box has been dragged
+  anchor: Point; // the grip across from the one in hand
+  mode: GripMode;
+  cursor: string;
+  strokes: Stroke[]; // the originals
+  images: Map<string, Rect>; // each picture's rectangle at the start
+  preview: Map<string, Stroke>; // reshaped copies standing in on screen
+  stale: boolean; // `to` has moved since the preview was built
+  // Too much ink to rebuild at pointer speed: the originals are drawn through
+  // a stretched canvas instead, and rebuilt once, when the drag ends.
+  affine: boolean;
+}
+
 type Drag =
   | { kind: 'draw' }
   | { kind: 'erase' }
   | { kind: 'lasso' }
   | { kind: 'move'; startX: number; startY: number }
   | { kind: 'region'; x0: number; y0: number }
-  | { kind: 'resize'; id: string; anchor: Point; from: Rect; mode: GripMode }
+  | Reshape
   | { kind: 'pan'; startX: number; startY: number; camX: number; camY: number };
 let drag: Drag | null = null;
 let activePointer: number | null = null;
@@ -254,10 +295,12 @@ function requestRender(): void {
   requestAnimationFrame(() => {
     dirty = false;
     syncSelectionBar();
+    const reshape = drag?.kind === 'transform' ? drag : null;
+    if (reshape) refreshReshape(reshape);
     const frame = board.activeFrame;
     const strokes = board.strokes.flatMap((stroke) => {
       if (stroke.frame !== frame || erasePending.has(stroke.id)) return [];
-      return areaEraseChanges.get(stroke.id)?.after ?? [stroke];
+      return areaEraseChanges.get(stroke.id)?.after ?? [reshape?.preview.get(stroke.id) ?? stroke];
     });
     render(ctx, canvas, camera, strokes, {
       theme: THEMES[themeName],
@@ -270,15 +313,7 @@ function requestRender(): void {
       marquee: lasso
         ? { poly: lasso, ids: null, dx: 0, dy: 0, dashOffset }
         : selection
-          ? {
-            poly: selection.poly,
-            ids: selection.ids,
-            imageIds: selection.images,
-            grips: selectionGrips(),
-            dx: moveX,
-            dy: moveY,
-            dashOffset,
-          }
+          ? selectionMarquee(selection)
           : null,
       layers: board.layers,
       activeLayer: board.activeLayer,
@@ -473,16 +508,18 @@ function afterEdit(moved: { ids: string[]; dx: number; dy: number } | null, kind
   const sel = selection;
   if (!sel) return;
   if (moved && moved.ids.length === sel.ids.size && moved.ids.every((id) => sel.ids.has(id))) {
-    sel.poly = sel.poly.map((p) => ({ x: p.x + moved.dx, y: p.y + moved.dy }));
+    shiftSelection(sel, moved.dx, moved.dy);
     requestRender();
     return;
   }
-  // Undoing a resize leaves the picture selected — only its rectangle changed,
-  // so the outline is re-derived rather than thrown away.
-  if (kind === 'image-resize' && sel.images.size === 1 && sel.ids.size === 0) {
-    const image = board.images.find((im) => im.id === [...sel.images][0]);
-    if (image) {
-      sel.poly = rectPoly(imageBBox(image));
+  // A reshape keeps every id it touched, so undoing or redoing one leaves the
+  // selection good — only its box changed, and the outline follows the box.
+  if (kind === 'transform') {
+    sel.box = undefined; // measured afresh from the ink it now holds
+    const box = selectionBox();
+    if (box) {
+      sel.loop = false;
+      sel.poly = boxPoly(box);
       requestRender();
       return;
     }
@@ -684,7 +721,7 @@ function updateUndoButtons(): void {
 function updateCursor(): void {
   if (drag?.kind === 'pan') canvas.style.cursor = 'grabbing';
   else if (drag?.kind === 'move') canvas.style.cursor = 'grabbing';
-  else if (drag?.kind === 'resize') canvas.style.cursor = drag.mode === 'x' ? 'ew-resize' : drag.mode === 'y' ? 'ns-resize' : 'nwse-resize';
+  else if (drag?.kind === 'transform') canvas.style.cursor = drag.cursor;
   else if (pickerActive()) canvas.style.cursor = 'none'; // the loupe is the cursor
   else if (tool === 'select' && hoverHandle) canvas.style.cursor = hoverHandle;
   else if (spaceHeld || tool === 'hand') canvas.style.cursor = 'grab';
@@ -1819,85 +1856,150 @@ function selectImage(image: BoardImage): void {
   requestRender();
 }
 
-// The eight grips of the selected picture: four corners, then four edge
-// midpoints (top, right, bottom, left). Corners scale; edges stretch one axis.
-function selectionGrips(): Point[] | null {
-  const sel = selection;
-  if (!sel || sel.ids.size > 0 || sel.images.size !== 1) return null;
-  const image = board.images.find((im) => im.id === [...sel.images][0]);
-  if (!image) return null;
-  const b = imageBBox(image);
-  const cx = (b.minX + b.maxX) / 2;
-  const cy = (b.minY + b.maxY) / 2;
-  return [
-    { x: b.minX, y: b.minY },
-    { x: b.maxX, y: b.minY },
-    { x: b.maxX, y: b.maxY },
-    { x: b.minX, y: b.maxY },
-    { x: cx, y: b.minY },
-    { x: b.maxX, y: cy },
-    { x: cx, y: b.maxY },
-    { x: b.minX, y: cy },
-  ];
+// ---- reshaping a selection --------------------------------------------------
+
+// The box a selection's grips sit on: everything it holds, ink margins and all
+// — or, once it has been reshaped, the box exactly as it was let go. Measuring
+// the ink again would pull the grips in from under the pointer, anchored edge
+// included, because a line's width follows a stretch less than its length does.
+function selectionBox(): Rect | null {
+  if (selection?.box) return selection.box;
+  const box = board.contentBBox(selectedStrokes(), selectedImages());
+  return box ? bboxRect(box) : null;
 }
 
-type GripMode = 'corner' | 'x' | 'y';
+function shiftSelection(sel: BoardSelection, dx: number, dy: number): void {
+  sel.poly = sel.poly.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+  if (sel.box) sel.box = { ...sel.box, x: sel.box.x + dx, y: sel.box.y + dy };
+}
 
-// Which grip, if any, is under a screen point. Corners pivot around the
-// opposite corner; edges stretch on one axis about the opposite edge.
-function handleAt(sx: number, sy: number): { image: BoardImage; anchor: Point; mode: GripMode } | null {
-  if (!selection || selection.images.size !== 1 || selection.ids.size > 0) return null;
-  const image = board.images.find((im) => im.id === [...selection!.images][0]);
-  if (!image) return null;
-  const corners = selectionGrips();
-  if (!corners) return null;
-  // Opposite grip for each index above: corners mirror across the center,
-  // edges mirror to the opposite edge.
-  const opposite = [2, 3, 0, 1, 6, 7, 4, 5];
-  for (let i = 0; i < corners.length; i++) {
-    const p = toScreen(camera, corners[i].x, corners[i].y);
-    if (Math.abs(p.x - sx) <= HANDLE && Math.abs(p.y - sy) <= HANDLE) {
-      const mode: GripMode = i < 4 ? 'corner' : i % 2 === 1 ? 'x' : 'y';
-      return { image, anchor: corners[opposite[i]], mode };
+function boxPoly(r: Rect): Point[] {
+  return rectPoly({ minX: r.x, minY: r.y, maxX: r.x + r.width, maxY: r.y + r.height });
+}
+
+// The grips worth showing on a box, by their index into boxGrips. An edge grip
+// drops out when its side is too short on screen to hold one between the
+// corners, which leaves a small selection four grips instead of a clump.
+// `shown` is the box as it is on screen now — mid-drag, not the one the grips
+// are measured from.
+function gripsOf(box: Rect, shown: Rect = box): { i: number; p: Point }[] {
+  const a = toScreen(camera, shown.x, shown.y);
+  const b = toScreen(camera, shown.x + shown.width, shown.y);
+  const c = toScreen(camera, shown.x, shown.y + shown.height);
+  const across = Math.hypot(b.x - a.x, b.y - a.y) >= HANDLE * 3;
+  const down = Math.hypot(c.x - a.x, c.y - a.y) >= HANDLE * 3;
+  return boxGrips(box).flatMap((p, i) => {
+    const mode = gripMode(i);
+    // Left and right grips sit halfway down a side, top and bottom halfway across.
+    const fits = mode === 'corner' || (mode === 'x' ? down : across);
+    return fits ? [{ i, p }] : [];
+  });
+}
+
+// Which grip, if any, is under a screen point: the box it belongs to, what it
+// does, the point across the box that holds still, and the cursor for it.
+function gripAt(sx: number, sy: number): { box: Rect; anchor: Point; mode: GripMode; cursor: string } | null {
+  if (!selection) return null;
+  const box = selectionBox();
+  if (!box) return null;
+  const all = boxGrips(box);
+  const centre = toScreen(camera, box.x + box.width / 2, box.y + box.height / 2);
+  for (const { i, p } of gripsOf(box)) {
+    const s = toScreen(camera, p.x, p.y);
+    if (Math.abs(s.x - sx) <= HANDLE && Math.abs(s.y - sy) <= HANDLE) {
+      return { box, anchor: all[OPPOSITE[i]], mode: gripMode(i), cursor: resizeCursor(s.x - centre.x, s.y - centre.y) };
     }
   }
   return null;
 }
 
-const MIN_IMAGE = 8; // world units
+const MIN_BOX = 6; // css px: the smallest a selection can be squeezed to on screen
+// Rebuilding a selection's strokes costs time in proportion to its ink. Past
+// this many milliseconds in one frame, a drag stops rebuilding live.
+const RESHAPE_BUDGET = 24;
 
-// Scales about the anchored corner. Corners keep proportions unless `free`
-// (Shift); edge grips stretch a single axis about the opposite edge.
-function resizeRect(from: Rect, anchor: Point, w: Point, mode: GripMode, free: boolean): Rect {
-  if (mode === 'x') {
-    const width = Math.max(MIN_IMAGE, Math.abs(w.x - anchor.x));
-    return { x: Math.min(anchor.x, w.x), y: from.y, width, height: from.height };
-  }
-  if (mode === 'y') {
-    const height = Math.max(MIN_IMAGE, Math.abs(w.y - anchor.y));
-    return { x: from.x, y: Math.min(anchor.y, w.y), width: from.width, height };
-  }
-  const dx = w.x - anchor.x;
-  const dy = w.y - anchor.y;
-  if (free) {
-    const width = Math.max(MIN_IMAGE, Math.abs(dx));
-    const height = Math.max(MIN_IMAGE, Math.abs(dy));
-    return {
-      x: dx < 0 ? anchor.x - width : anchor.x,
-      y: dy < 0 ? anchor.y - height : anchor.y,
-      width,
-      height,
-    };
-  }
-  const k = Math.max(Math.abs(dx) / from.width, Math.abs(dy) / from.height);
-  const width = Math.max(MIN_IMAGE, from.width * k);
-  const height = Math.max(MIN_IMAGE, from.height * k);
+function beginReshape(grip: NonNullable<ReturnType<typeof gripAt>>): Reshape {
+  const images = new Map<string, Rect>();
+  for (const im of selectedImages()) images.set(im.id, { x: im.x, y: im.y, width: im.width, height: im.height });
   return {
-    x: dx < 0 ? anchor.x - width : anchor.x,
-    y: dy < 0 ? anchor.y - height : anchor.y,
-    width,
-    height,
+    kind: 'transform',
+    from: grip.box,
+    to: grip.box,
+    anchor: grip.anchor,
+    mode: grip.mode,
+    cursor: grip.cursor,
+    strokes: selectedStrokes(),
+    images,
+    preview: new Map(),
+    stale: false,
+    affine: false,
   };
+}
+
+// Brings the on-screen preview up to the latest `to`, once per frame however
+// many pointer events arrived. Pictures are resized in place — a rectangle is
+// cheap — and put back before the edit is recorded.
+function refreshReshape(t: Reshape): void {
+  if (!t.stale) return;
+  t.stale = false;
+  for (const [id, r] of t.images) {
+    const image = board.images.find((im) => im.id === id);
+    if (image) Object.assign(image, transformRect(r, t.from, t.to));
+  }
+  if (t.affine) return;
+  const started = performance.now();
+  for (const s of t.strokes) t.preview.set(s.id, transformStroke(s, t.from, t.to));
+  if (performance.now() - started > RESHAPE_BUDGET) {
+    t.affine = true;
+    t.preview.clear();
+  }
+}
+
+function commitReshape(t: Reshape): void {
+  for (const [id, r] of t.images) {
+    const image = board.images.find((im) => im.id === id);
+    if (image) Object.assign(image, r);
+  }
+  const { from, to } = t;
+  if (from.x === to.x && from.y === to.y && from.width === to.width && from.height === to.height) return;
+  board.transformItems(
+    t.strokes.map((s) => transformStroke(s, from, to)),
+    [...t.images].map(([id, r]) => ({ id, to: transformRect(r, from, to) }))
+  );
+  const sel = selection;
+  if (!sel) return;
+  sel.box = to;
+  // A lasso outline is carried along with what it holds; a box outline is the box.
+  sel.poly = sel.loop ? sel.poly.map((p) => mapPoint(p, from, to)) : boxPoly(to);
+}
+
+// The outline, grips and in-flight change for the selection, this frame.
+function selectionMarquee(sel: BoardSelection): Marquee {
+  const t = drag?.kind === 'transform' ? drag : null;
+  const box = t ? t.from : selectionBox();
+  const map = t ? boxAffine(t.from, t.to) : { sx: 1, sy: 1, dx: moveX, dy: moveY };
+  return {
+    poly: sel.loop || !box ? sel.poly : boxPoly(box),
+    // A move lifts everything into the shifted pass. A reshape shows rebuilt
+    // copies instead and resizes pictures in place, so only ink too heavy to
+    // rebuild live goes through the stretched pass.
+    ids: t ? (t.affine ? sel.ids : null) : sel.ids,
+    imageIds: t ? null : sel.images,
+    grips: box ? gripsOf(box, t ? t.to : box).map((g) => g.p) : null,
+    frame: sel.loop === true,
+    ...map,
+    dashOffset,
+  };
+}
+
+// Inside the outline or inside the box the grips are on: a lasso loop can be
+// drawn tighter or looser than the ink, and either should pick it up.
+function insideSelection(w: Point): boolean {
+  const sel = selection;
+  if (!sel) return false;
+  if (pointInPolygon(sel.poly, w.x, w.y)) return true;
+  const box = selectionBox();
+  return box !== null && w.x >= box.x && w.x <= box.x + box.width && w.y >= box.y && w.y <= box.y + box.height;
 }
 
 function rectPoly(b: { minX: number; minY: number; maxX: number; maxY: number }): Point[] {
@@ -2286,7 +2388,7 @@ function commitLasso(): void {
     selection = image ? { ids, images: pics, poly: rectPoly(imageBBox(image)) } : null;
     return;
   }
-  selection = ids.size > 0 || pics.size > 0 ? { ids, images: pics, poly } : null;
+  selection = ids.size > 0 || pics.size > 0 ? { ids, images: pics, poly, loop: true } : null;
 }
 
 function deleteSelection(): void {
@@ -2343,16 +2445,10 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   } else if (tool === 'select' && e.button === 0) {
     const w = toWorld(camera, e.offsetX, e.offsetY);
-    const grip = handleAt(e.offsetX, e.offsetY);
+    const grip = gripAt(e.offsetX, e.offsetY);
     if (grip) {
-      drag = {
-        kind: 'resize',
-        id: grip.image.id,
-        anchor: grip.anchor,
-        mode: grip.mode,
-        from: { x: grip.image.x, y: grip.image.y, width: grip.image.width, height: grip.image.height },
-      };
-    } else if (selection && pointInPolygon(selection.poly, w.x, w.y)) {
+      drag = beginReshape(grip);
+    } else if (selection && insideSelection(w)) {
       // Press inside the outline picks the selection up instead of redrawing it.
       drag = { kind: 'move', startX: e.clientX, startY: e.clientY };
       moveX = 0;
@@ -2389,9 +2485,8 @@ canvas.addEventListener('pointermove', (e) => {
       requestRender();
     } else if (tool === 'select' && selection) {
       const w = toWorld(camera, e.offsetX, e.offsetY);
-      const inside = pointInPolygon(selection.poly, w.x, w.y);
-      const grip = handleAt(e.offsetX, e.offsetY);
-      const onGrip = grip ? (grip.mode === 'x' ? 'ew-resize' : grip.mode === 'y' ? 'ns-resize' : 'nwse-resize') : null;
+      const inside = insideSelection(w);
+      const onGrip = gripAt(e.offsetX, e.offsetY)?.cursor ?? null;
       if (inside !== hoverInSelection || onGrip !== hoverHandle) {
         hoverInSelection = inside;
         hoverHandle = onGrip;
@@ -2400,18 +2495,17 @@ canvas.addEventListener('pointermove', (e) => {
     }
     return;
   }
-  if (drag.kind === 'resize') {
-    const resize = drag;
-    const image = board.images.find((im) => im.id === resize.id);
-    if (image) {
-      const r = resizeRect(resize.from, resize.anchor, toWorld(camera, e.offsetX, e.offsetY), resize.mode, e.shiftKey);
-      image.x = r.x;
-      image.y = r.y;
-      image.width = r.width;
-      image.height = r.height;
-      if (selection) selection.poly = rectPoly(imageBBox(image));
-      requestRender();
-    }
+  if (drag.kind === 'transform') {
+    // Shift frees a corner's proportions; Option grows the box about its middle.
+    const t = drag;
+    const centre = { x: t.from.x + t.from.width / 2, y: t.from.y + t.from.height / 2 };
+    t.to = resizeRect(t.from, e.altKey ? centre : t.anchor, toWorld(camera, e.offsetX, e.offsetY), t.mode, {
+      free: e.shiftKey,
+      centered: e.altKey,
+      min: MIN_BOX / camera.scale,
+    });
+    t.stale = true;
+    requestRender();
     return;
   }
   if (drag.kind === 'move') {
@@ -2480,22 +2574,15 @@ function endGesture(e: PointerEvent): void {
     addLassoPoint(e);
     commitLasso();
     syncAnts();
-  } else if (drag.kind === 'resize') {
-    const resize = drag;
-    const image = board.images.find((im) => im.id === resize.id);
-    if (image) {
-      const to = { x: image.x, y: image.y, width: image.width, height: image.height };
-      Object.assign(image, resize.from); // rewind the preview so the op records both ends
-      board.resizeImage(resize.id, to);
-      if (selection) selection.poly = rectPoly(imageBBox(image));
-    }
+  } else if (drag.kind === 'transform') {
+    commitReshape(drag);
   } else if (drag.kind === 'region') {
     regionDrag = null;
     captureRegion(drag.x0, drag.y0, e.offsetX, e.offsetY);
   } else if (drag.kind === 'move' && selection) {
     // Commit once, as a single undo step, and carry the outline along with it.
     board.moveItems(selection.ids, selection.images, moveX, moveY);
-    selection.poly = selection.poly.map((p) => ({ x: p.x + moveX, y: p.y + moveY }));
+    shiftSelection(selection, moveX, moveY);
     moveX = 0;
     moveY = 0;
   }
